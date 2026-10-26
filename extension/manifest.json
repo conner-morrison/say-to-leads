@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Say To Leads – Human Flow",
+  "version": "0.1.0",
+  "description": "Screen-driven, human-paced automation for one linked tab. Debug mode routes AI analysis through a local bridge (Claude Code).",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "tabs", "scripting", "debugger", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Say To Leads",
+    "default_popup": "popup/popup.html"
+  },
+  "options_page": "options/options.html"
+}

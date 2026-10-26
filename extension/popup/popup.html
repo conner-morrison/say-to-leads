@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="../ui.css" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <strong>Say To Leads</strong>
+      <span id="status" class="pill">idle</span>
+    </header>
+
+    <section class="card">
+      <div class="row">
+        <div class="grow">
+          <div class="label">Linked tab</div>
+          <div id="tabTitle" class="ellipsis muted">— none —</div>
+        </div>
+        <button id="link" class="secondary">Link this tab</button>
+      </div>
+    </section>
+
+    <section class="controls">
+      <button id="start" class="primary">Start</button>
+      <button id="pause">Pause</button>
+      <button id="resume">Resume</button>
+      <button id="stop" class="danger">Stop</button>
+    </section>
+
+    <section class="card">
+      <div class="stats">
+        <div><span id="cycles">0</span><label>cycles</label></div>
+        <div><span id="analyses">0</span><label>AI calls</label></div>
+        <div><span id="actions">0</span><label>actions</label></div>
+        <div><span id="events">0</span><label>events</label></div>
+      </div>
+      <div id="meta" class="muted small"></div>
+      <div id="waiting" class="waiting hidden">Waiting for analyzer… <span id="waitSec"></span></div>
+      <div id="summary" class="summary"></div>
+      <div id="error" class="error hidden"></div>
+    </section>
+
+    <section class="card log-card">
+      <div class="row">
+        <div class="label grow">Log</div>
+        <button id="clear" class="link">clear</button>
+        <button id="settings" class="link">settings ⚙</button>
+      </div>
+      <div id="log" class="log"></div>
+    </section>
+
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>

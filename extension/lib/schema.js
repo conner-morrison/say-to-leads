@@ -1,0 +1,76 @@
+// The contract between the extension and any analyzer (Claude Code via bridge, or the API).
+// Keep bridge/cli.py ACTION_TYPES and CLAUDE.md in sync with this file.
+
+export const ACTION_TYPES = ['click', 'double_click', 'hover', 'type', 'key', 'scroll', 'wait', 'notify', 'pause', 'stop'];
+
+export const RESULT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['summary', 'actions', 'next_check_sec'],
+  properties: {
+    summary: { type: 'string', description: 'One or two sentences: what is on screen and what you decided.' },
+    actions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['type'],
+        properties: {
+          type: { type: 'string', enum: ACTION_TYPES },
+          x: { type: 'number', description: '0..1 from the left edge of the screenshot' },
+          y: { type: 'number', description: '0..1 from the top edge of the screenshot' },
+          box: { type: 'array', items: { type: 'number' }, description: '[x1,y1,x2,y2] normalized 0..1 – preferred for click targets' },
+          selector: { type: 'string', description: 'CSS selector, if known; overrides x/y/box' },
+          text: { type: 'string' },
+          key: { type: 'string', description: 'e.g. Enter, Escape, Tab, Ctrl+A' },
+          dy: { type: 'number', description: 'scroll pixels, positive = down' },
+          ms: { type: 'number' },
+          photo: { type: 'boolean', description: 'notify: attach the screenshot' },
+          clear: { type: 'boolean', description: 'type: clear the field first' },
+          reason: { type: 'string' },
+        },
+      },
+    },
+    next_check_sec: { anyOf: [{ type: 'number' }, { type: 'null' }] },
+  },
+};
+
+export const SYSTEM_PROMPT = `You operate one browser tab on behalf of a human, through screenshots.
+Each turn you get a screenshot of the visible viewport, the job description, recent page events
+(new notifications / unread counters) and a short history of your previous turns.
+
+Reply with JSON only, matching the schema:
+- summary: what you see and what you decided.
+- actions: a short list (0-5) executed in order with human-like timing. Coordinates are normalized
+  to the screenshot: x,y in 0..1 from the top-left. Prefer "box" (the whole button/field) over a point.
+  click/double_click/hover need a target. "type" types text (optionally targets a field first; set
+  clear=true to replace existing text). "key" presses a key or combo (Enter, Escape, Ctrl+A).
+  "scroll" uses dy pixels. "wait" waits ms. "notify" messages the human on Telegram (photo=true to
+  attach the screenshot). "pause" pauses the run for the human. "stop" ends the run.
+- next_check_sec: when to look again (null = default pacing).
+
+Rules: act only on what you can see. After a meaningful action, verify on the next screenshot
+instead of chaining many blind steps. If unsure or something looks wrong (login wall, captcha,
+error, unexpected page), use notify and pause rather than guessing. Empty actions is fine.`;
+
+const clamp01 = (v) => Math.min(1, Math.max(0, Number(v)));
+
+export function sanitizeResult(r) {
+  if (!r || typeof r !== 'object') throw new Error('analyzer returned no object');
+  const actions = Array.isArray(r.actions) ? r.actions : [];
+  return {
+    summary: String(r.summary || ''),
+    next_check_sec: typeof r.next_check_sec === 'number' && r.next_check_sec >= 0 ? r.next_check_sec : null,
+    actions: actions
+      .filter((a) => a && ACTION_TYPES.includes(a.type))
+      .slice(0, 10)
+      .map((a) => {
+        const out = { ...a };
+        if (out.x != null) out.x = clamp01(out.x);
+        if (out.y != null) out.y = clamp01(out.y);
+        if (Array.isArray(out.box) && out.box.length === 4) out.box = out.box.map(clamp01);
+        else delete out.box;
+        return out;
+      }),
+  };
+}

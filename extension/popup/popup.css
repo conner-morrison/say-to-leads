@@ -1,0 +1,18 @@
+body { width: 380px; padding: 10px; }
+header { display: flex; justify-content: space-between; align-items: center; }
+.pill { padding: 2px 8px; border-radius: 99px; font-size: 11px; background: var(--line); }
+.pill.running { background: var(--ok); color: #fff; }
+.pill.paused, .pill.break { background: var(--warn); color: #fff; }
+.pill.waiting_ai { background: var(--primary); color: #fff; }
+.controls { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); text-align: center; margin-bottom: 6px; }
+.stats span { font-size: 18px; font-weight: 600; display: block; }
+.stats label { font-size: 10px; color: var(--muted); }
+.summary { margin-top: 6px; white-space: pre-wrap; }
+.waiting { margin-top: 6px; color: var(--primary); }
+.error { margin-top: 6px; color: var(--danger); }
+.log { height: 190px; overflow-y: auto; font: 11px/1.35 ui-monospace, monospace; margin-top: 6px; }
+.log div { padding: 1px 0; border-bottom: 1px dotted var(--line); word-break: break-word; }
+.log .warn { color: var(--warn); }
+.log .error { color: var(--danger); }
+.log .debug { color: var(--muted); }
