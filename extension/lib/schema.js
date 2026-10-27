@@ -1,7 +1,7 @@
 // The contract between the extension and any analyzer (Claude Code via bridge, or the API).
 // Keep bridge/cli.py ACTION_TYPES and CLAUDE.md in sync with this file.
 
-export const ACTION_TYPES = ['click', 'double_click', 'hover', 'type', 'key', 'scroll', 'wait', 'notify', 'next', 'pause', 'stop'];
+export const ACTION_TYPES = ['click', 'double_click', 'hover', 'type', 'key', 'scroll', 'browse', 'wait', 'notify', 'next', 'pause', 'stop'];
 
 export const RESULT_SCHEMA = {
   type: 'object',
@@ -25,6 +25,7 @@ export const RESULT_SCHEMA = {
           key: { type: 'string', description: 'e.g. Enter, Escape, Tab, Ctrl+A' },
           dy: { type: 'number', description: 'scroll pixels, positive = down' },
           ms: { type: 'number' },
+          sec: { type: 'number', description: 'browse: how long to read the page (default 25-70 random)' },
           photo: { type: 'boolean', description: 'notify: attach the screenshot' },
           clear: { type: 'boolean', description: 'type: clear the field first' },
           reason: { type: 'string' },
@@ -57,14 +58,16 @@ Reply with JSON only, matching the schema:
   to the screenshot: x,y in 0..1 from the top-left. Prefer "box" (the whole button/field) over a point.
   click/double_click/hover need a target. "type" types text (optionally targets a field first; set
   clear=true to replace existing text). "key" presses a key or combo (Enter, Escape, Ctrl+A).
-  "scroll" uses dy pixels. "wait" waits ms. "notify" messages the human on Telegram (photo=true to
+  "scroll" uses dy pixels. "browse" reads the whole page like a person (random scrolls to any depth,
+  pauses, then back to the top) without screenshots – optional sec. "wait" waits ms. "notify" messages the human on Telegram (photo=true to
   attach the screenshot). "next" means the job on this page is done: the next feed URL is opened (after
   the last one the run ends) and actions after it are skipped. "pause" pauses the run for the human.
   "stop" ends the run.
 - next_check_sec: when to look again (null = default pacing).
 - inbox: only when the prompt says an INBOX CHECK is due (see there); otherwise leave it out.
 
-Rules: act only on what you can see. After a meaningful action, verify on the next screenshot
+Rules: if FEED says "not opened yet", the job has not started: answer only "next" (or nothing).
+Act only on what you can see. After a meaningful action, verify on the next screenshot
 instead of chaining many blind steps. If unsure or something looks wrong (login wall, captcha,
 error, unexpected page), use notify and pause rather than guessing. Empty actions is fine.`;
 

@@ -5,14 +5,11 @@ Do this on each page, then answer `next`.
 
 ## Steps
 
-0. **Browse first, like a human.** On a newly opened profile, before touching Connect, read it for
-   a while (about 20–60 s total, different every page):
-   - 1–2 turns of `scroll` down (`dy` 250–700, vary it) with `wait` 1500–6000 ms between them;
-     sometimes a `hover` over something readable (About, Experience) or a small scroll back up.
-   - Go about 2–4 screens deep (About → Activity → Experience), then scroll back to the top
-     (one or two big negative `dy`) and wait 1–3 s before step 1.
-   - Never click anything while browsing (no links, no "…see more" that navigates, no Messaging panel).
-   - Skip browsing only when resuming on a profile that was already browsed (history shows it).
+0. **Browse first, like a human.** On a newly opened profile, answer a single `{"type": "browse"}`
+   (the extension scrolls to random depths of the whole page, pauses, and returns to the top on its
+   own – no screenshots, so it costs nothing). Don't steer browsing with scroll/wait turns.
+   The next screenshot shows the profile back at the top → step 1.
+   Skip browsing only when resuming on a profile that was already browsed (history shows it).
 1. Find the profile's action row under the headline: **Message**, **+ Follow**, **More**
    (only the row in the profile header – not the "More profiles for you" column on the right).
 2. If that row shows **Pending** → the invitation was already sent: do nothing, `next`.
@@ -59,6 +56,11 @@ Positions are normalized [x1, y1, x2, y2].
   3rd-degree profiles show no Connect in the row – it is in More.
 - 2nd-degree profiles (e.g. Quinsen Joel) show **Connect** (blue) first in the row:
   Connect ≈ [0.182,0.637,0.236,0.668] · Message · More.
+- The row's y position depends on how many lines the headline wraps to: Rene Pascua (3-line headline)
+  had Connect at ≈ [0.184,0.733,0.234,0.76]. Always read it off the screenshot.
+- After scrolling past the header, a sticky bar at the top shows More · Message · Connect
+  (≈ y 0.08–0.12, right side of the main column). Scroll back to the top anyway before connecting.
+- **Add a note** moves up when the modal text is shorter: ≈ [0.472,0.3,0.528,0.327] on Rene Pascua.
 - **More dropdown** opens *above* the button (x ≈ 0.30–0.45, y ≈ 0.23–0.63), items top to bottom:
   Send profile in a message · Save to PDF · **Connect** (≈ [0.31,0.382,0.44,0.415]) · Report ·
   Block · About this member.

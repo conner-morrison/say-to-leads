@@ -3,7 +3,8 @@ import { detectHardware, resolveProfile } from '../lib/profiles.js';
 
 // [path, label, type, extra]. type: text | number | textarea | check | select | password | time | list
 const SECTIONS = [
-  ['Feed', [
+  ['Feed & job', [
+    ['task.job', 'Job (what to do on each page)', 'textarea', { wide: true, rows: 14, help: 'Instructions the AI follows on every page. Clear the box and save to restore the default LinkedIn connect job.' }],
     ['task.feed', 'Page URLs, one per line', 'textarea', { wide: true, rows: 8, help: 'Opened in the linked tab in this order, one at a time, when the analyzer asks for the next page (Start itself opens nothing). The run ends after the last URL. Lines starting with # are skipped.' }],
     ['task.forceAnalyzeEverySec', 'Force analysis every (sec)', 'number', { help: 'Even if the screen looks unchanged.' }],
     ['task.changeThreshold', 'Change threshold (0-255)', 'number', { help: 'Lower = more sensitive = more AI calls.' }],
@@ -36,6 +37,7 @@ const SECTIONS = [
       help: 'Used only in Claude API mode. Prices are input / output per 1M tokens.',
     }],
     ['analyzer.effort', 'Effort', 'select', { options: [['low', 'low'], ['medium', 'medium'], ['high', 'high']] }],
+    ['analyzer.mirrorToBridge', 'Mirror turns to the bridge', 'check', { help: 'Claude API mode: also send each turn (screenshot + answer) to the bridge so Claude Code can watch the run. Harmless if the bridge is off.' }],
     ['analyzer.imageScale', 'Screenshot size for AI', 'select', {
       options: [['1', 'Full'], ['0.5', '1/2 (~1/4 of image cost)'], ['0.333', '1/3 (~1/9 of image cost)']],
       help: 'Smaller is cheaper, but small text gets hard to read. Raise it if clicks miss.',

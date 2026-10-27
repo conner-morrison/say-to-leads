@@ -6,7 +6,7 @@ import { resolveProfile, detectHardware } from './lib/profiles.js';
 import { RunControl, StopSignal } from './lib/control.js';
 import { log, getLogs, clearLogs, setVerbose } from './lib/logger.js';
 import { captureTab, diffThumbs, blobToBase64 } from './lib/capture.js';
-import { analyze, bridgeHealth } from './lib/analyzer.js';
+import { analyze, bridgeHealth, buildUserText, estimateCost, mirrorTurn } from './lib/analyzer.js';
 import { Telegram } from './lib/telegram.js';
 import { CdpBackend, DomBackend, HumanInput } from './lib/input.js';
 import { humanBetween, pointInBox, jitterPoint, chance, rnd, clamp } from './lib/human.js';
@@ -19,7 +19,7 @@ const state = {
   profile: null,
   driver: null,
   analyzer: null,
-  stats: { cycles: 0, analyses: 0, actions: 0, events: 0 },
+  stats: { cycles: 0, analyses: 0, actions: 0, events: 0, cost: 0 },
   lastSummary: '',
   nextBreakAt: null,
   aiWaitingSince: null,
@@ -80,6 +80,12 @@ async function handle(msg, sender) {
       publish();
       return {};
     }
+    case 'unlinkTab':
+      if (ctl.active) throw new Error('Stop the run before dropping the linked tab.');
+      log.info(`Dropped linked tab: ${state.tabTitle}`);
+      Object.assign(state, { tabId: null, tabTitle: '', error: null });
+      publish();
+      return {};
     case 'start':
       await start();
       return {};
@@ -115,7 +121,12 @@ async function handle(msg, sender) {
 }
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (tabId === state.tabId && ctl.active) stop('linked tab was closed');
+  if (tabId !== state.tabId) return;
+  if (ctl.active) stop('linked tab was closed');
+  else {
+    Object.assign(state, { tabId: null, tabTitle: '' });
+    publish();
+  }
 });
 
 // ---------- lifecycle ----------
@@ -145,6 +156,7 @@ async function start() {
     feed,
     feedIndex: -1, // nothing opened yet; the first "next" opens feed[0]
     nextPage: false, // set by the "next" action, handled at the end of the cycle
+    pick: pickMessage(settings), // saved first message to use on the current page (random per page)
     events: [],
     history: [],
     lastThumb: null,
@@ -160,7 +172,7 @@ async function start() {
     analyzer: settings.analyzer.mode,
     error: null,
     lastSummary: '',
-    stats: { cycles: 0, analyses: 0, actions: 0, events: 0 },
+    stats: { cycles: 0, analyses: 0, actions: 0, events: 0, cost: 0 },
     feed: feed.length ? { index: -1, total: feed.length, url: feed[0] } : null,
   });
   scheduleBreak();
@@ -260,11 +272,16 @@ async function openFeedPage(i) {
   log.info(`Feed ${i + 1}/${feed.length}: ${feed[i]}`);
   await navigate(state.tabId, feed[i]);
   // Fresh page, fresh short-term memory; analyze it right away.
-  Object.assign(run, { history: [], lastActions: [], lastThumb: null, lastAnalysisAt: 0, events: [] });
+  Object.assign(run, { history: [], lastActions: [], lastThumb: null, lastAnalysisAt: 0, events: [], pick: pickMessage(run.settings) });
   publish();
 }
 
 // ---------- schedule ----------
+
+function pickMessage(settings) {
+  const n = settings.messages.first.length;
+  return n ? Math.floor(Math.random() * n) : null;
+}
 
 function scheduleBreak() {
   const h = run.settings.human;
@@ -403,7 +420,9 @@ async function cycle() {
     id: `${Date.now().toString(36)}-${state.stats.cycles}`,
     created: Date.now(),
     feed: state.feed,
+    job: settings.task.job,
     firstMessages: settings.messages.first,
+    pickedMessage: run.pick,
     sendMode: settings.messages.sendMode,
     inbox,
     page: { url: vp.url, title: vp.title, viewport: { w: vp.w, h: vp.h } },
@@ -417,14 +436,26 @@ async function cycle() {
   state.aiWaitingSince = Date.now();
   publish();
   log.info(`→ analyzer (${settings.analyzer.mode}) request ${req.id}`);
+  const mirror = settings.analyzer.mode === 'anthropic' && settings.analyzer.mirrorToBridge;
   let result;
   try {
     result = await analyze(req, settings, ctl.signal);
   } catch (e) {
     run.events.unshift(...events); // don't lose events on a failed analysis
+    if (mirror && !ctl.stopped) mirrorTurn(settings, { ...req, model: settings.analyzer.model, prompt: buildUserText(req), error: e.message });
     throw e;
   }
   ctl.set('running');
+  if (result.usage) {
+    const cost = estimateCost(settings.analyzer.model, result.usage);
+    state.stats.cost += cost;
+    const u = result.usage;
+    log.debug(`tokens in=${u.input_tokens} cache_read=${u.cache_read_input_tokens || 0} cache_write=${u.cache_creation_input_tokens || 0} out=${u.output_tokens} ≈ $${cost.toFixed(4)}`);
+  }
+  if (mirror) {
+    const { usage, model, ...answer } = result;
+    mirrorTurn(settings, { ...req, model, usage, prompt: buildUserText(req), result: answer });
+  }
 
   run.lastAnalysisAt = Date.now();
   state.stats.analyses++;
@@ -447,6 +478,57 @@ async function cycle() {
     return null;
   }
   return result.next_check_sec != null ? result.next_check_sec * 1000 : null;
+}
+
+// ---------- browsing ----------
+// "browse": read the page like a person, with no screenshots or AI calls. Scrolls to random depths
+// anywhere in the page (the height is re-read each stop, since sections load lazily), pauses to
+// "read", drifts the mouse, sometimes backtracks, and ends back at the top.
+
+async function browsePage(sec) {
+  const { input } = run;
+  const vp = await sendToTab(state.tabId, { cmd: 'viewport' });
+  // Keep the wheel over the main column, away from docked side panels.
+  await input.move({ x: rnd(vp.w * 0.22, vp.w * 0.45), y: rnd(vp.h * 0.35, vp.h * 0.8) });
+  // Measured at the mouse: the page may scroll an inner container rather than the document.
+  const geo = () => sendToTab(state.tabId, { cmd: 'scrollInfo', x: input.pos.x, y: input.pos.y });
+  const end = Date.now() + clamp(sec ?? rnd(25, 70), 5, 300) * 1000;
+  let g = await geo();
+  let first = true;
+  while (Date.now() < end) {
+    g = await geo();
+    const maxY = Math.max(0, g.height - g.view);
+    if (maxY < 50) {
+      log.warn('browse: nothing to scroll here');
+      break;
+    }
+    // The first stop goes deep so the whole page gets covered; later stops land anywhere.
+    const target = first ? rnd(0.55, 1) * maxY : rnd(0, 1) * maxY;
+    first = false;
+    // Travel there a screen or so at a time, glancing at each part on the way.
+    let left = target - g.top;
+    while (Math.abs(left) > 60 && Date.now() < end) {
+      const step = Math.sign(left) * Math.min(Math.abs(left), rnd(0.5, 1.1) * g.view);
+      await input.scroll(step);
+      left -= step;
+      await ctl.sleep(humanBetween(700, 2500));
+    }
+    await ctl.sleep(humanBetween(1500, 6000)); // read this part
+    if (chance(0.4)) await input.fidget();
+    if (chance(0.25)) {
+      await input.scroll(-rnd(120, 320)); // re-read something just above
+      await ctl.sleep(humanBetween(800, 2500));
+    }
+  }
+  g = await geo();
+  if (g.top > 0) {
+    await input.scroll(-(g.top + 200));
+    await ctl.sleep(humanBetween(300, 900));
+    g = await geo();
+    if (g.top > 0) await input.scroll(-(g.top + 200)); // smooth-scroll lag or lazy content
+  }
+  await ctl.sleep(humanBetween(1000, 3000));
+  log.info(`Browsed the page (${(g.height / g.view).toFixed(1)} screens)`);
 }
 
 // ---------- inbox monitor ----------
@@ -534,6 +616,9 @@ async function executeActions(actions, vp, shot) {
         case 'scroll':
           await input.scroll(clamp(a.dy ?? 300, -5000, 5000));
           break;
+        case 'browse':
+          await browsePage(a.sec);
+          break;
         case 'wait':
           await ctl.sleep(clamp(a.ms ?? 1000, 0, 600_000));
           break;
@@ -595,7 +680,7 @@ function statusText() {
   const s = state.stats;
   const f = state.feed;
   const feed = !f ? '' : f.index < 0 ? `\nFeed: ${f.total} pages, none opened yet` : `\nFeed: page ${f.index + 1}/${f.total} ${f.url}`;
-  return `Status: ${state.status}\nTab: ${state.tabTitle}${feed}\nUptime: ${up} min\nCycles ${s.cycles} · AI ${s.analyses} · actions ${s.actions} · events ${s.events}\nLast: ${state.lastSummary || '-'}`;
+  return `Status: ${state.status}\nTab: ${state.tabTitle}${feed}\nUptime: ${up} min\nCycles ${s.cycles} · AI ${s.analyses}${s.cost ? ` (≈$${s.cost.toFixed(2)})` : ''} · actions ${s.actions} · events ${s.events}\nLast: ${state.lastSummary || '-'}`;
 }
 
 async function onTelegramCommand(cmd) {

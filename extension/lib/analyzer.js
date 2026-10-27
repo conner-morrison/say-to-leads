@@ -24,6 +24,9 @@ export function buildUserText(req) {
   const first = req.firstMessages?.length
     ? `\n\nSAVED FIRST MESSAGES (use only when the job asks for one):\n${req.firstMessages.map((m, i) => `${i + 1}. ${m.replace(/\n/g, '\n   ')}`).join('\n')}`
     : '';
+  const pick = req.firstMessages?.length && req.pickedMessage != null
+    ? `\n\nMESSAGE FOR THIS PAGE: #${req.pickedMessage + 1} (picked at random for this page)`
+    : '';
   const send = req.sendMode === 'auto'
     ? 'auto – after typing a message, click Send yourself.'
     : 'review – after typing a message, do NOT click Send: notify the human and pause; they send it and resume.';
@@ -35,14 +38,21 @@ export function buildUserText(req) {
 Previous top: ${ib.lastTop ? `"${ib.lastTop}" (${new Date(ib.lastAt).toLocaleString()})` : '(none – first check, accepted = [])'}.
 Conversations listed above the previous top that are NOT unread are people who accepted the invitation
 (put them in accepted). If the panel is collapsed, click its header to open it and leave "inbox" out this turn.`;
-  return `FEED: ${feed}${first}\n\nSEND MODE: ${send}${inbox}\n\nPAGE: ${req.page.title}\nURL: ${req.page.url}\nLOCAL TIME: ${new Date(req.created).toString()}\n\nNEW PAGE EVENTS:\n${ev}\n\nRESULT OF YOUR LAST ACTIONS:\n${last}\n\nRECENT HISTORY:\n${hist}`;
+  return `FEED: ${feed}${first}${pick}\n\nSEND MODE: ${send}${inbox}\n\nPAGE: ${req.page.title}\nURL: ${req.page.url}\nLOCAL TIME: ${new Date(req.created).toString()}\n\nNEW PAGE EVENTS:\n${ev}\n\nRESULT OF YOUR LAST ACTIONS:\n${last}\n\nRECENT HISTORY:\n${hist}`;
 }
 
+// The job is fixed for a run, so it belongs with the system prompt (cacheable), not the per-turn text.
+const jobText = (req) => `JOB (what to do on each page):\n${req.job || '(none given – observe and report only)'}`;
+
+// Returns the sanitized result, plus { usage, model } in Claude API mode.
 export async function analyze(req, settings, signal) {
   const a = settings.analyzer;
   if (a.mode === 'none') return { summary: '(watch-only mode)', actions: [], next_check_sec: null };
   if (a.mode === 'bridge') return sanitizeResult(await viaBridge(req, a, signal));
-  if (a.mode === 'anthropic') return sanitizeResult(await viaAnthropic(req, a, signal));
+  if (a.mode === 'anthropic') {
+    const { result, usage, model } = await viaAnthropic(req, a, signal);
+    return { ...sanitizeResult(result), usage, model };
+  }
   throw new Error(`unknown analyzer mode ${a.mode}`);
 }
 
@@ -51,7 +61,7 @@ async function viaBridge(req, a, signal) {
   const res = await fetch(`${a.bridgeUrl.replace(/\/$/, '')}/analyze`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...req, system: SYSTEM_PROMPT, prompt: buildUserText(req), timeoutSec: a.bridgeTimeoutSec }),
+    body: JSON.stringify({ ...req, system: `${SYSTEM_PROMPT}\n\n${jobText(req)}`, prompt: buildUserText(req), timeoutSec: a.bridgeTimeoutSec }),
     signal: AbortSignal.any([signal, timeout]),
   });
   const body = await res.json().catch(() => ({}));
@@ -76,7 +86,11 @@ async function viaAnthropic(req, a, signal) {
       model: a.model,
       max_tokens: 16000,
       ...(fallback && { fallbacks: 'default' }),
-      system: SYSTEM_PROMPT,
+      // Same bytes every turn → cached after the first call (the breakpoint covers both blocks).
+      system: [
+        { type: 'text', text: SYSTEM_PROMPT },
+        { type: 'text', text: jobText(req), cache_control: { type: 'ephemeral' } },
+      ],
       output_config: { effort: a.effort, format: { type: 'json_schema', schema: RESULT_SCHEMA } },
       messages: [
         {
@@ -95,10 +109,32 @@ async function viaAnthropic(req, a, signal) {
   if (msg.stop_reason === 'refusal') throw new Error(`API refusal: ${msg.stop_details?.explanation || ''}`);
   if (msg.stop_reason === 'max_tokens') throw new Error('API output truncated (max_tokens)');
   const text = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
-  return JSON.parse(text);
+  return { result: JSON.parse(text), usage: msg.usage, model: msg.model };
 }
 
 export async function bridgeHealth(url) {
   const res = await fetch(`${url.replace(/\/$/, '')}/health`, { signal: AbortSignal.timeout(3000) });
   return res.json();
+}
+
+// USD per 1M tokens [input, output] – for the rough cost shown in the popup (Settings lists the same).
+const PRICES = { 'claude-opus-5-5': [4, 20], 'claude-sonnet-5-5': [2, 10], 'claude-haiku-5-5': [0.1, 0.5], 'claude-fable-5-1': [10, 50] };
+
+// Approximate: cache writes billed at 1.25× input, cache reads at 0.1× (a little less on some models).
+export function estimateCost(model, u) {
+  const [pin, pout] = PRICES[model] || PRICES['claude-opus-5-5'];
+  if (!u) return 0;
+  const input = (u.input_tokens || 0) + 1.25 * (u.cache_creation_input_tokens || 0) + 0.1 * (u.cache_read_input_tokens || 0);
+  return (input * pin + (u.output_tokens || 0) * pout) / 1e6;
+}
+
+// Fire-and-forget copy of a finished Claude API turn to the bridge (/mirror), for watching a run.
+export function mirrorTurn(settings, turn) {
+  const url = settings.analyzer.bridgeUrl.replace(/\/$/, '');
+  fetch(`${url}/mirror`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(turn),
+    signal: AbortSignal.timeout(5000),
+  }).catch(() => {}); // bridge not running → nothing to do
 }

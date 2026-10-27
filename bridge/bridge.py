@@ -6,6 +6,9 @@ The bridge saves it to data/inbox/<id>.jpg + <id>.json and holds the HTTP reques
 until an answer appears in data/outbox/<id>.json (written by Claude Code via cli.py),
 then returns that answer to the extension. Standard library only.
 
+In Claude API mode the extension can POST a copy of each finished turn (request + the API's
+answer) to /mirror; it is only recorded in data/mirror/ so a run can be watched (cli.py mirror).
+
     python3 bridge/bridge.py [--port 8765]
 """
 import argparse
@@ -19,8 +22,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 DATA = Path(__file__).resolve().parent / "data"
-INBOX, OUTBOX, ARCHIVE = DATA / "inbox", DATA / "outbox", DATA / "archive"
+INBOX, OUTBOX, ARCHIVE, MIRROR = DATA / "inbox", DATA / "outbox", DATA / "archive", DATA / "mirror"
 KEEP_ARCHIVED = 200
+KEEP_MIRRORED = 400  # files (2 per turn)
 lock = threading.Lock()
 
 
@@ -70,12 +74,14 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
-        if not self.path.startswith("/analyze"):
+        if not self.path.startswith(("/analyze", "/mirror")):
             return self._send(404, {"ok": False, "error": "not found"})
         try:
             req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         except (ValueError, json.JSONDecodeError):
             return self._send(400, {"ok": False, "error": "bad json"})
+        if self.path.startswith("/mirror"):
+            return self.mirror(req)
 
         rid = re.sub(r"[^A-Za-z0-9_-]", "", str(req.get("id") or int(time.time() * 1000)))
         img = req.pop("image", {}) or {}
@@ -118,12 +124,30 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, {"ok": False, "error": "timeout"})
 
 
+    def mirror(self, req):
+        rid = re.sub(r"[^A-Za-z0-9_-]", "", str(req.get("id") or int(time.time() * 1000)))
+        img = req.pop("image", {}) or {}
+        b64 = img.pop("base64", None)
+        with lock:
+            jpg = MIRROR / f"{rid}.jpg"
+            if b64:
+                jpg.write_bytes(base64.b64decode(b64))
+            req["image"] = {**img, "file": str(jpg)}
+            (MIRROR / f"{rid}.json").write_text(json.dumps(req, indent=2, ensure_ascii=False))
+            for f in sorted(MIRROR.iterdir(), key=lambda p: p.stat().st_mtime)[:-KEEP_MIRRORED]:
+                f.unlink(missing_ok=True)
+        res, use = req.get("result") or {}, req.get("usage") or {}
+        acts = ", ".join(a.get("type", "?") for a in res.get("actions", [])) or "no actions"
+        log(f"API {rid} · in={use.get('input_tokens', '?')} out={use.get('output_tokens', '?')} · {acts} · {res.get('summary', '')[:80]}")
+        self._send(200, {"ok": True})
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
     a = ap.parse_args()
-    for d in (INBOX, OUTBOX, ARCHIVE):
+    for d in (INBOX, OUTBOX, ARCHIVE, MIRROR):
         d.mkdir(parents=True, exist_ok=True)
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     srv.daemon_threads = True

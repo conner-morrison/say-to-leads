@@ -1,10 +1,15 @@
 // Settings schema + persistence. Everything the user can tune lives here.
 
+import { DEFAULT_JOB } from './job-default.js';
+
 export const DEFAULTS = {
   task: {
     // Pages to work through, one URL per line, opened in the linked tab in order. Start opens
     // nothing; each "next" action from the analyzer opens the following URL.
     feed: '',
+    // What the analyzer should do on each page. Sent with every request (cached as part of the
+    // system prompt in Claude API mode). In bridge mode Claude Code also follows jobs/*.md.
+    job: DEFAULT_JOB,
     // Ask the analyzer at least this often even if the screen looks unchanged.
     forceAnalyzeEverySec: 180,
     // Mean pixel difference (0-255) on the tiny thumbnail that counts as "screen changed".
@@ -32,6 +37,7 @@ export const DEFAULTS = {
     model: 'claude-opus-5-5',
     effort: 'low', // low | medium | high – low keeps latency/cost down for a loop
     imageScale: 0.333, // screenshot size sent to the analyzer: 1 | 0.5 | 0.333 (≈1/9 of the image tokens)
+    mirrorToBridge: true, // Claude API mode: also POST each turn to the bridge's /mirror so a run can be watched
   },
   input: {
     driver: 'debugger', // 'debugger' = trusted CDP input (recommended) | 'dom' = synthetic events
@@ -92,9 +98,13 @@ export function deepMerge(base, over) {
 
 export async function loadSettings() {
   const { settings } = await chrome.storage.local.get('settings');
-  return deepMerge(structuredClone(DEFAULTS), settings || {});
+  const s = deepMerge(structuredClone(DEFAULTS), settings || {});
+  if (!String(s.task.job || '').trim()) s.task.job = DEFAULT_JOB; // an emptied box means "use the default"
+  return s;
 }
 
 export async function saveSettings(settings) {
+  // An unedited job is stored empty, so improvements to the built-in default reach existing installs.
+  if (String(settings.task?.job || '').trim() === DEFAULT_JOB.trim()) settings = { ...settings, task: { ...settings.task, job: '' } };
   await chrome.storage.local.set({ settings });
 }

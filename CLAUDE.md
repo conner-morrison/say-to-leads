@@ -37,6 +37,15 @@ answer `"inbox": {"top": "<first non-Sponsored name in the list>", "unread": [bl
 above the previous top that are not unread]}` – the extension stores `top` and sends the Telegram note
 itself. Leave `inbox` out (it stays due) if the panel is collapsed; open it instead.
 
+## Claude API mode (production)
+
+The job text lives in Settings → Feed & job → Job (`task.job`; the default is `extension/lib/job-default.js`,
+a model-facing version of `jobs/linkedin-connect.md`, so keep the two in sync). It is sent as a cached
+system block. The extension picks one random saved first message per page (`pickedMessage`).
+To watch an API run, use `python3 bridge/cli.py mirror [N]` (turns are mirrored to `bridge/data/mirror/`
+when `analyzer.mirrorToBridge` is on). Look at the screenshots and answers and report problems.
+Never answer them; the API already did.
+
 ## Jobs
 
 The job the user gives in chat is written down in `jobs/*.md` (e.g. `jobs/linkedin-connect.md`).
@@ -60,7 +69,8 @@ Follow the current one in the debug loop and add layout lessons learned from scr
 - Coordinates are normalized to the screenshot (0..1, origin top-left). Prefer `box`
   (whole target) – the extension picks a human-like point inside it. `x`/`y` and `selector` also work.
 - Types: click, double_click, hover, type (optional target, `clear`), key (`Enter`, `Escape`,
-  `Ctrl+A`…), scroll (`dy` px), wait (`ms`), notify (Telegram, `photo`), next (page done → next feed
+  `Ctrl+A`…), scroll (`dy` px), browse (reads the whole page by itself – random depths, pauses,
+  back to top – with no screenshots; optional `sec`), wait (`ms`), notify (Telegram, `photo`), next (page done → next feed
   URL; later actions are skipped), pause, stop.
 - Keep 0–5 actions per turn and verify on the next screenshot. `"\n"` in `type` text is sent as
   Shift+Enter (newline without sending). Use `key: Enter` to send.

@@ -221,6 +221,18 @@
         return { ok: true };
       case 'viewport':
         return { ok: true, w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio, url: location.href, title: document.title };
+      case 'scrollInfo': {
+        // Some apps (e.g. LinkedIn) scroll an inner container, not the document: measure whatever
+        // scrolls under the mouse.
+        const n = scrollableAt(document.elementFromPoint(m.x, m.y) || document.body);
+        const doc = n === document.scrollingElement || n === document.documentElement;
+        return {
+          ok: true,
+          top: doc ? window.scrollY : n.scrollTop,
+          height: n.scrollHeight,
+          view: doc ? window.innerHeight : n.clientHeight,
+        };
+      }
       case 'resolve': {
         const el = document.querySelector(m.selector);
         if (!el) return { ok: false, error: 'selector not found' };

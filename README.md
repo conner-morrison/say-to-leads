@@ -73,6 +73,18 @@ structured JSON output with the same schema the bridge uses, so the behaviour st
 It also turns on Anthropic's server-side refusal fallback. The key is kept in
 `chrome.storage.local` in this browser profile.
 
+- **Job:** Settings → Feed & job → **Job** is what the model does on every page. It comes pre-filled
+  with the LinkedIn connect job (`jobs/linkedin-connect.md`). Clear the box to restore the default.
+  The job goes into the system prompt and is cached, so it costs little after the first turn.
+- **First message:** the extension picks one saved first message at random for each page
+  (`MESSAGE FOR THIS PAGE` in the prompt). The model only fills in the name.
+- **Cost:** the popup shows a running estimate (≈$ spent). On Opus 5.5 at 1/2 screenshot size, one
+  turn is roughly 1–2 cents. A profile takes about 6–8 turns: browse, Connect, Add a note, type,
+  review, next.
+- **Watching a run:** with **Mirror turns to the bridge** on (Analyzer section) and the bridge running,
+  every API turn (screenshot, prompt, answer, tokens) is also saved to `bridge/data/mirror/`. See them
+  with `python3 bridge/cli.py mirror 10`. The bridge never answers these, so it can't change a run.
+
 ## Telegram
 
 Create a bot with @BotFather, send it any message, and read your chat id from

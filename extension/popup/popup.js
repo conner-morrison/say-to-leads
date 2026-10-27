@@ -14,12 +14,14 @@ function render() {
   $('resume').disabled = s !== 'paused';
   $('stop').disabled = !active;
   $('link').disabled = active;
+  $('link').textContent = state.tabId ? 'Drop linked tab' : 'Link this tab';
   for (const k of ['cycles', 'analyses', 'actions', 'events']) $(k).textContent = state.stats[k];
   const bits = [];
   if (state.feed && active) bits.push(`page ${state.feed.index + 1}/${state.feed.total}`);
   if (state.profile) bits.push(`profile ${state.profile}`);
   if (state.driver) bits.push(`driver ${state.driver}`);
   if (state.analyzer) bits.push(`AI ${state.analyzer}`);
+  if (state.stats.cost) bits.push(`≈$${state.stats.cost.toFixed(2)} spent`);
   if (state.nextBreakAt && active) bits.push(`break ~${new Date(state.nextBreakAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
   $('meta').textContent = bits.join(' · ');
   $('summary').textContent = state.lastSummary || '';
@@ -58,6 +60,7 @@ $('clear').onclick = () => {
 };
 $('settings').onclick = () => chrome.runtime.openOptionsPage();
 $('link').onclick = async () => {
+  if (state?.tabId) return act('unlinkTab');
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab) act('linkTab', { tabId: tab.id });
 };

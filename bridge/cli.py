@@ -5,6 +5,7 @@
     python3 bridge/cli.py list                   list pending request ids
     python3 bridge/cli.py show [ID]              show a request (default: newest pending)
     python3 bridge/cli.py respond ID JSON        answer it (JSON string, @file, or - for stdin; ID may be 'latest')
+    python3 bridge/cli.py mirror [N]             last N turns of a Claude API run (mirrored, read-only)
 """
 import argparse
 import json
@@ -13,10 +14,10 @@ import time
 from pathlib import Path
 
 DATA = Path(__file__).resolve().parent / "data"
-INBOX, OUTBOX = DATA / "inbox", DATA / "outbox"
+INBOX, OUTBOX, MIRROR = DATA / "inbox", DATA / "outbox", DATA / "mirror"
 
 # Keep in sync with extension/lib/schema.js
-ACTION_TYPES = {"click", "double_click", "hover", "type", "key", "scroll", "wait", "notify", "next", "pause", "stop"}
+ACTION_TYPES = {"click", "double_click", "hover", "type", "key", "scroll", "browse", "wait", "notify", "next", "pause", "stop"}
 
 
 def pending():
@@ -44,6 +45,27 @@ def show(rid):
     print(req.get("prompt", ""))
     print("-" * 70)
     print(f"Answer with: python3 bridge/cli.py respond {rid} '<json>'")
+
+
+def mirror(n):
+    turns = sorted(MIRROR.glob("*.json"), key=lambda p: p.stat().st_mtime)[-n:]
+    if not turns:
+        print("nothing mirrored yet (Claude API mode with 'Mirror turns to the bridge' on)")
+    for p in turns:
+        t = json.loads(p.read_text())
+        res, use = t.get("result") or {}, t.get("usage") or {}
+        when = time.strftime("%H:%M:%S", time.localtime((t.get("created") or 0) / 1000))
+        print(f"=== {p.stem} {when} · {t.get('model', '')} · {t.get('page', {}).get('title', '')[:50]}")
+        print(f"    image  {t.get('image', {}).get('file')}")
+        print(f"    tokens in={use.get('input_tokens')} cache_read={use.get('cache_read_input_tokens')} "
+              f"cache_write={use.get('cache_creation_input_tokens')} out={use.get('output_tokens')}")
+        if t.get("error"):
+            print(f"    ERROR  {t['error']}")
+        print(f"    said   {res.get('summary', '')}")
+        for a in res.get("actions", []):
+            print(f"    -> {json.dumps(a, ensure_ascii=False)}")
+        if res.get("inbox"):
+            print(f"    inbox  {json.dumps(res['inbox'], ensure_ascii=False)}")
 
 
 def validate(obj):
@@ -83,6 +105,8 @@ def main():
     r = sub.add_parser("respond")
     r.add_argument("id")
     r.add_argument("answer")
+    m = sub.add_parser("mirror")
+    m.add_argument("n", nargs="?", type=int, default=5)
     a = ap.parse_args()
     INBOX.mkdir(parents=True, exist_ok=True)
     OUTBOX.mkdir(parents=True, exist_ok=True)
@@ -95,6 +119,8 @@ def main():
             time.sleep(0.5)
         print("no request within timeout")
         sys.exit(2)
+    if a.cmd == "mirror":
+        return mirror(a.n)
     if a.cmd == "list":
         for p in pending():
             print(p.stem)
