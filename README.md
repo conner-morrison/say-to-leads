@@ -26,9 +26,11 @@ notifications and messages, and reports to you on Telegram.
    pick the `extension/` folder.
 2. **Start the bridge** (debug mode): `python3 bridge/bridge.py` (Python 3.8+, no packages needed).
 3. Open the target website, click the extension icon → **Link this tab**.
-4. ⚙ **Settings**: write the *Job instructions*, set up Telegram (optional), save.
-5. Press **Start**. In Claude Code, ask: *"run the debug loop"* (see `CLAUDE.md`). Claude waits for
-   each screenshot, looks at it, and sends back actions.
+4. ⚙ **Settings**: put the page URLs in *Feed* (one per line), set up Telegram (optional), save.
+5. Press **Start**. Start opens no page and does no job on its own; while the screen is unchanged it
+   only makes small humanized idle moves (mouse drift, a short scroll down and back). In Claude Code, tell Claude the job and ask it to *"run the debug
+   loop"* (see `CLAUDE.md`). Claude looks at each screenshot and sends back actions. Its first `next`
+   opens feed URL 1, each later `next` the following URL; the run ends after the last one.
 
 ## Humanized behaviour
 

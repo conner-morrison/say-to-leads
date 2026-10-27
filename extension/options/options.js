@@ -1,21 +1,45 @@
 import { DEFAULTS, loadSettings, saveSettings } from '../lib/settings.js';
 import { detectHardware, resolveProfile } from '../lib/profiles.js';
 
-// [path, label, type, extra]. type: text | number | textarea | check | select | password | time
+// [path, label, type, extra]. type: text | number | textarea | check | select | password | time | list
 const SECTIONS = [
-  ['Job', [
-    ['task.instructions', 'Job instructions for the analyzer', 'textarea', { wide: true, rows: 6, help: 'Sent with every screenshot. Be concrete: what to look for, what to reply, when to notify you.' }],
+  ['Feed', [
+    ['task.feed', 'Page URLs, one per line', 'textarea', { wide: true, rows: 8, help: 'Opened in the linked tab in this order, one at a time, when the analyzer asks for the next page (Start itself opens nothing). The run ends after the last URL. Lines starting with # are skipped.' }],
     ['task.forceAnalyzeEverySec', 'Force analysis every (sec)', 'number', { help: 'Even if the screen looks unchanged.' }],
     ['task.changeThreshold', 'Change threshold (0-255)', 'number', { help: 'Lower = more sensitive = more AI calls.' }],
     ['task.historyLength', 'History turns sent', 'number'],
+  ]],
+  ['First messages', [
+    ['messages.first', 'Saved first messages', 'list', { wide: true, addLabel: '+ Add message', help: 'Openers the analyzer can send when the job asks for a first message. Empty boxes are dropped on save.' }],
+    ['messages.sendMode', 'Send mode', 'select', {
+      options: [['review', 'Review – type it, then pause for me to check and send'], ['auto', 'Full auto – click Send automatically']],
+      help: 'In Review mode you get a Telegram note; click Send yourself, then press Resume.',
+    }],
+  ]],
+  ['Inbox monitor', [
+    ['monitor.inboxEveryMin', 'Check Messaging panel every (min)', 'number', {
+      help: 'The AI reads the Messaging panel on the right: unread (blue bold) items → new message; a different person on top than last time → they accepted your invitation. You get a Telegram note. 0 = off. Not checked while paused.',
+    }],
   ]],
   ['Analyzer', [
     ['analyzer.mode', 'Mode', 'select', { options: [['bridge', 'Bridge – debug via Claude Code'], ['anthropic', 'Claude API (API key)'], ['none', 'None – watch & notify only']] }],
     ['analyzer.bridgeUrl', 'Bridge URL', 'text'],
     ['analyzer.bridgeTimeoutSec', 'Bridge answer timeout (sec)', 'number'],
     ['analyzer.apiKey', 'Anthropic API key', 'password', { help: 'Stored locally in this browser profile only.' }],
-    ['analyzer.model', 'Model', 'text', { help: 'e.g. claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5' }],
+    ['analyzer.model', 'Model', 'select', {
+      options: [
+        ['claude-opus-5-5', 'Claude Opus 5.5 – recommended ($4 / $20 per 1M tokens)'],
+        ['claude-sonnet-5-5', 'Claude Sonnet 5.5 – faster, cheaper ($2 / $10)'],
+        ['claude-haiku-5-5', 'Claude Haiku 5.5 – cheapest for a busy loop ($0.10 / $0.50)'],
+        ['claude-fable-5-1', 'Claude Fable 5.1 – most capable, slowest ($10 / $50)'],
+      ],
+      help: 'Used only in Claude API mode. Prices are input / output per 1M tokens.',
+    }],
     ['analyzer.effort', 'Effort', 'select', { options: [['low', 'low'], ['medium', 'medium'], ['high', 'high']] }],
+    ['analyzer.imageScale', 'Screenshot size for AI', 'select', {
+      options: [['1', 'Full'], ['0.5', '1/2 (~1/4 of image cost)'], ['0.333', '1/3 (~1/9 of image cost)']],
+      help: 'Smaller is cheaper, but small text gets hard to read. Raise it if clicks miss.',
+    }],
   ]],
   ['Input & performance', [
     ['input.driver', 'Input driver', 'select', { options: [['debugger', 'Debugger (trusted events, shows banner)'], ['dom', 'DOM events (no banner, less compatible)']] }],
@@ -84,6 +108,9 @@ function build() {
       } else if (type === 'select') {
         input = document.createElement('select');
         for (const [v, l] of extra.options) input.add(new Option(l, v));
+      } else if (type === 'list') {
+        input = document.createElement('div');
+        input.className = 'list';
       } else {
         input = document.createElement('input');
         input.type = type === 'check' ? 'checkbox' : type;
@@ -100,6 +127,13 @@ function build() {
         lab.prepend(input);
         f.append(lab);
       } else f.append(lab, input);
+      if (type === 'list') {
+        const add = document.createElement('button');
+        add.type = 'button';
+        add.textContent = extra.addLabel || '+ Add';
+        add.onclick = () => addListItem(input, '').querySelector('textarea').focus();
+        f.append(add);
+      }
       if (extra.help) {
         const h = document.createElement('div');
         h.className = 'help';
@@ -112,11 +146,45 @@ function build() {
   }
 }
 
+// One numbered textarea + Remove button inside a "list" field.
+function addListItem(list, text) {
+  const row = document.createElement('div');
+  row.className = 'list-item';
+  const n = document.createElement('span');
+  n.className = 'list-num';
+  const ta = document.createElement('textarea');
+  ta.rows = 3;
+  ta.value = text;
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'danger';
+  del.textContent = 'Remove';
+  del.onclick = () => {
+    row.remove();
+    renumber(list);
+  };
+  row.append(n, ta, del);
+  list.append(row);
+  renumber(list);
+  return row;
+}
+
+function renumber(list) {
+  list.querySelectorAll('.list-num').forEach((n, i) => (n.textContent = `${i + 1}.`));
+}
+
 function fill(s) {
   for (const el of form.querySelectorAll('[data-path]')) {
     const v = get(s, el.dataset.path);
-    if (el.dataset.kind === 'check') el.checked = !!v;
-    else el.value = v ?? '';
+    if (el.dataset.kind === 'list') {
+      el.textContent = '';
+      for (const t of Array.isArray(v) ? v : []) addListItem(el, t);
+    } else if (el.dataset.kind === 'check') el.checked = !!v;
+    else {
+      // Keep a saved value that is no longer in the list instead of showing a blank select.
+      if (el.tagName === 'SELECT' && v && ![...el.options].some((o) => o.value === v)) el.add(new Option(v, v));
+      el.value = v ?? '';
+    }
   }
 }
 
@@ -124,6 +192,10 @@ function collect(base) {
   const s = structuredClone(base);
   for (const el of form.querySelectorAll('[data-path]')) {
     const k = el.dataset.kind;
+    if (k === 'list') {
+      set(s, el.dataset.path, [...el.querySelectorAll('textarea')].map((t) => t.value.trim()).filter(Boolean));
+      continue;
+    }
     set(s, el.dataset.path, k === 'check' ? el.checked : k === 'number' ? Number(el.value) : el.value);
   }
   return s;

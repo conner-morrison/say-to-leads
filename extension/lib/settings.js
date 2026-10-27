@@ -2,15 +2,27 @@
 
 export const DEFAULTS = {
   task: {
-    // What the analyzer (Claude Code in debug mode, or the API later) should do on this site.
-    instructions:
-      'Describe the job here. Example: "Watch the inbox. When a new lead message appears, open it, reply with a short friendly greeting, then notify me on Telegram."',
+    // Pages to work through, one URL per line, opened in the linked tab in order. Start opens
+    // nothing; each "next" action from the analyzer opens the following URL.
+    feed: '',
     // Ask the analyzer at least this often even if the screen looks unchanged.
     forceAnalyzeEverySec: 180,
     // Mean pixel difference (0-255) on the tiny thumbnail that counts as "screen changed".
     changeThreshold: 5,
     // How many recent analyzer summaries to send back as short-term memory.
     historyLength: 6,
+  },
+  messages: {
+    // Saved first messages (openers). Sent to the analyzer with every request.
+    first: [],
+    // 'review': type the message, then pause so the human checks it and sends it.
+    // 'auto': the analyzer clicks Send itself.
+    sendMode: 'review',
+  },
+  monitor: {
+    // Every N minutes the analyzer reads the Messaging panel: unread (blue bold) conversations are
+    // new messages, and a new name on top since the last check is someone who accepted. 0 = off.
+    inboxEveryMin: 60,
   },
   analyzer: {
     mode: 'bridge', // 'bridge' (debug, Claude Code) | 'anthropic' (API key) | 'none' (watch-only)
@@ -19,6 +31,7 @@ export const DEFAULTS = {
     apiKey: '',
     model: 'claude-opus-5-5',
     effort: 'low', // low | medium | high – low keeps latency/cost down for a loop
+    imageScale: 0.333, // screenshot size sent to the analyzer: 1 | 0.5 | 0.333 (≈1/9 of the image tokens)
   },
   input: {
     driver: 'debugger', // 'debugger' = trusted CDP input (recommended) | 'dom' = synthetic events

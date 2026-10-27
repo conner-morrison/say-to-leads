@@ -125,9 +125,11 @@ async function start() {
   if (!state.tabId) throw new Error('Link a tab first.');
   const tab = await chrome.tabs.get(state.tabId).catch(() => null);
   if (!tab) throw new Error('Linked tab no longer exists – link a tab again.');
-  if (/^(chrome|edge|about|chrome-extension|devtools):/.test(tab.url || '')) throw new Error('Browser internal pages cannot be automated.');
 
   const settings = await loadSettings();
+  const feed = parseFeed(settings.task.feed);
+  if (/^(chrome|edge|about|chrome-extension|devtools):/.test(tab.url || '')) throw new Error('Browser internal pages cannot be automated.');
+
   setVerbose(settings.debug.verbose);
   const profile = resolveProfile(settings.performance.profile);
   const backend = settings.input.driver === 'dom' ? new DomBackend(tab.id) : new CdpBackend(tab.id, onDebuggerDetached);
@@ -140,6 +142,9 @@ async function start() {
     backend,
     telegram,
     input: new HumanInput(backend, { profile, human: settings.human, ctl, tabId: tab.id, showCursor: settings.input.showCursor }),
+    feed,
+    feedIndex: -1, // nothing opened yet; the first "next" opens feed[0]
+    nextPage: false, // set by the "next" action, handled at the end of the cycle
     events: [],
     history: [],
     lastThumb: null,
@@ -156,6 +161,7 @@ async function start() {
     error: null,
     lastSummary: '',
     stats: { cycles: 0, analyses: 0, actions: 0, events: 0 },
+    feed: feed.length ? { index: -1, total: feed.length, url: feed[0] } : null,
   });
   scheduleBreak();
   ctl.start();
@@ -201,6 +207,61 @@ function onDebuggerDetached(reason) {
   if (reason === 'target_closed') return stop('linked tab was closed');
   ctl.pause();
   run?.telegram.send(`⚠️ Debugger detached (${reason}) – run paused. Press Resume to re-attach.`, null, { dedupe: false });
+}
+
+// ---------- feed ----------
+
+// One URL per line; blank lines and #comments are skipped, a missing scheme means https.
+function parseFeed(text) {
+  return String(text || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'))
+    .map((l) => {
+      let u = null;
+      try {
+        u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(l) ? l : `https://${l}`);
+      } catch {}
+      if (!u || !/^https?:$/.test(u.protocol)) throw new Error(`Feed line is not a web URL: ${l}`);
+      return u.href;
+    });
+}
+
+// Open a URL in the linked tab and wait until it has loaded (or give up after 45 s).
+async function navigate(tabId, url) {
+  const loaded = new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve();
+    };
+    const onUpdated = (id, info) => id === tabId && info.status === 'complete' && done();
+    const timer = setTimeout(() => {
+      log.warn(`Page still loading after 45 s, continuing: ${url}`);
+      done();
+    }, 45_000);
+    chrome.tabs.onUpdated.addListener(onUpdated);
+  });
+  await chrome.tabs.update(tabId, { url });
+  await loaded;
+}
+
+// Move the linked tab to feed entry i, or end the run after the last one.
+async function openFeedPage(i) {
+  const { feed } = run;
+  if (i >= feed.length) {
+    log.info(`Feed finished (${feed.length} pages)`);
+    await stop('feed finished');
+    throw new StopSignal();
+  }
+  await ctl.sleep(humanBetween(1500, 4000)); // a person pauses before moving on
+  run.feedIndex = i;
+  state.feed = { index: i, total: feed.length, url: feed[i] };
+  log.info(`Feed ${i + 1}/${feed.length}: ${feed[i]}`);
+  await navigate(state.tabId, feed[i]);
+  // Fresh page, fresh short-term memory; analyze it right away.
+  Object.assign(run, { history: [], lastActions: [], lastThumb: null, lastAnalysisAt: 0, events: [] });
+  publish();
 }
 
 // ---------- schedule ----------
@@ -315,7 +376,7 @@ async function cycle() {
 
   let shot;
   try {
-    shot = await captureTab(tab, { backend, profile });
+    shot = await captureTab(tab, { backend, profile, scale: Number(settings.analyzer.imageScale) || 1 });
   } catch (e) {
     if (e.message !== 'TAB_NOT_VISIBLE') throw e;
     log.warn('Linked tab is not visible – bring it to the front (or use the debugger driver)');
@@ -326,9 +387,10 @@ async function cycle() {
   run.lastThumb = shot.thumb;
   const events = run.events.splice(0);
   const stale = Date.now() - run.lastAnalysisAt > settings.task.forceAnalyzeEverySec * 1000;
-  log.debug(`cycle ${state.stats.cycles}: diff=${Number.isFinite(diff) ? diff.toFixed(1) : '∞'} events=${events.length} stale=${stale}`);
+  const inbox = await inboxDue(settings);
+  log.debug(`cycle ${state.stats.cycles}: diff=${Number.isFinite(diff) ? diff.toFixed(1) : '∞'} events=${events.length} stale=${stale} inbox=${!!inbox}`);
 
-  if (diff < settings.task.changeThreshold && !events.length && !stale) {
+  if (diff < settings.task.changeThreshold && !events.length && !stale && !inbox) {
     await idleBehavior();
     return null;
   }
@@ -340,7 +402,10 @@ async function cycle() {
   const req = {
     id: `${Date.now().toString(36)}-${state.stats.cycles}`,
     created: Date.now(),
-    task: settings.task.instructions,
+    feed: state.feed,
+    firstMessages: settings.messages.first,
+    sendMode: settings.messages.sendMode,
+    inbox,
     page: { url: vp.url, title: vp.title, viewport: { w: vp.w, h: vp.h } },
     events,
     history: run.history.slice(-settings.task.historyLength),
@@ -367,6 +432,7 @@ async function cycle() {
   log.info(`← ${result.summary}`, result.actions);
   run.history.push({ t: Date.now(), summary: result.summary, actions: result.actions.map((a) => a.type) });
   if (run.history.length > 20) run.history.shift();
+  if (inbox && result.inbox) await onInboxReport(result.inbox); // no report (panel closed) → still due next cycle
 
   if (result.actions.length) {
     await ctl.sleep(humanBetween(400, 1500)); // look at the screen before moving
@@ -375,9 +441,36 @@ async function cycle() {
   } else {
     run.lastActions = [];
   }
+  if (run.nextPage) {
+    run.nextPage = false;
+    await openFeedPage(run.feedIndex + 1);
+    return null;
+  }
   return result.next_check_sec != null ? result.next_check_sec * 1000 : null;
 }
 
+// ---------- inbox monitor ----------
+// The last seen top of the Messaging list is kept in storage, so it survives Stop/Start.
+
+async function inboxDue(settings) {
+  const min = Number(settings.monitor.inboxEveryMin) || 0;
+  if (min <= 0) return null;
+  const { inbox } = await chrome.storage.local.get('inbox');
+  if (inbox?.at && Date.now() - inbox.at < min * 60_000) return null;
+  return { lastTop: inbox?.top || null, lastAt: inbox?.at || null };
+}
+
+async function onInboxReport(r) {
+  await chrome.storage.local.set({ inbox: { top: r.top, at: Date.now() } });
+  log.info(`Inbox check: top=${r.top} unread=[${r.unread.join(', ')}] accepted=[${r.accepted.join(', ')}]`);
+  const lines = [];
+  if (r.unread.length) lines.push(`💬 New message${r.unread.length > 1 ? 's' : ''} from: ${r.unread.join(', ')}`);
+  if (r.accepted.length) lines.push(`🤝 Accepted your invitation: ${r.accepted.join(', ')}`);
+  if (lines.length) await run.telegram.send(lines.join('\n'));
+}
+
+// While nothing changes, act like a person reading: a small mouse drift, or a short scroll
+// down and back up. Both go through the humanized input layer (curved paths, scroll bursts).
 async function idleBehavior() {
   const h = run.settings.human;
   if (chance(h.idleMoveChance)) await run.input.fidget();
@@ -447,6 +540,10 @@ async function executeActions(actions, vp, shot) {
         case 'notify':
           await telegram.send(`💬 ${a.text || state.lastSummary}`, a.photo ? shot.blob : null);
           break;
+        case 'next':
+          if (run.feed.length) run.nextPage = true;
+          else log.warn('"next" ignored – the feed is empty');
+          break;
         case 'pause':
           log.warn(`Analyzer paused the run: ${a.reason || a.text || ''}`);
           await telegram.send(`⏸ Paused by analyzer: ${a.reason || a.text || ''}`, null, { dedupe: false });
@@ -467,6 +564,7 @@ async function executeActions(actions, vp, shot) {
       log.warn(`Action ${a.type} failed`, e.message);
     }
     report.push(rec);
+    if (run.nextPage) break; // the page is done; anything after "next" is skipped
   }
   return report;
 }
@@ -495,7 +593,9 @@ async function onPageEvent(ev) {
 function statusText() {
   const up = state.startedAt ? Math.round((Date.now() - state.startedAt) / 60_000) : 0;
   const s = state.stats;
-  return `Status: ${state.status}\nTab: ${state.tabTitle}\nUptime: ${up} min\nCycles ${s.cycles} · AI ${s.analyses} · actions ${s.actions} · events ${s.events}\nLast: ${state.lastSummary || '-'}`;
+  const f = state.feed;
+  const feed = !f ? '' : f.index < 0 ? `\nFeed: ${f.total} pages, none opened yet` : `\nFeed: page ${f.index + 1}/${f.total} ${f.url}`;
+  return `Status: ${state.status}\nTab: ${state.tabTitle}${feed}\nUptime: ${up} min\nCycles ${s.cycles} · AI ${s.analyses} · actions ${s.actions} · events ${s.events}\nLast: ${state.lastSummary || '-'}`;
 }
 
 async function onTelegramCommand(cmd) {

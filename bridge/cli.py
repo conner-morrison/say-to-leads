@@ -16,11 +16,13 @@ DATA = Path(__file__).resolve().parent / "data"
 INBOX, OUTBOX = DATA / "inbox", DATA / "outbox"
 
 # Keep in sync with extension/lib/schema.js
-ACTION_TYPES = {"click", "double_click", "hover", "type", "key", "scroll", "wait", "notify", "pause", "stop"}
+ACTION_TYPES = {"click", "double_click", "hover", "type", "key", "scroll", "wait", "notify", "next", "pause", "stop"}
 
 
 def pending():
-    return sorted(INBOX.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    # An answered request stays in the inbox until the bridge picks the answer up; skip it.
+    reqs = [p for p in INBOX.glob("*.json") if not (OUTBOX / p.name).exists()]
+    return sorted(reqs, key=lambda p: p.stat().st_mtime)
 
 
 def resolve(rid):
@@ -61,6 +63,9 @@ def validate(obj):
             raise ValueError(f"action {i}: {a['type']} needs box, x/y or selector")
         if "box" in a and (not isinstance(a["box"], list) or len(a["box"]) != 4):
             raise ValueError(f"action {i}: box must be [x1,y1,x2,y2]")
+    ib = obj.get("inbox")
+    if ib is not None and not (isinstance(ib, dict) and isinstance(ib.get("top"), str)):
+        raise ValueError('inbox must be {"top": str, "unread": [...], "accepted": [...]}')
     n = obj["next_check_sec"]
     if n is not None and not isinstance(n, (int, float)):
         raise ValueError("next_check_sec must be a number or null")

@@ -7,7 +7,9 @@ function withTimeout(p, ms, label) {
   return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${label} timeout`)), ms))]);
 }
 
-export async function captureTab(tab, { backend, profile }) {
+// scale shrinks the image further after the profile's width cap (e.g. 1/3 to save AI tokens).
+// Analyzer coordinates are normalized, so a smaller image needs no position conversion.
+export async function captureTab(tab, { backend, profile, scale: extraScale = 1 }) {
   let blob = null;
   if (backend?.kind === 'debugger' && backend.attached) {
     // CDP capture also works when the tab is not the focused one.
@@ -31,7 +33,7 @@ export async function captureTab(tab, { backend, profile }) {
   let out = blob;
   let w = bmp.width;
   let h = bmp.height;
-  const scale = Math.min(1, profile.captureMaxWidth / bmp.width);
+  const scale = Math.min(1, profile.captureMaxWidth / bmp.width) * Math.min(1, Math.max(0.1, extraScale));
   if (scale < 1) {
     w = Math.round(bmp.width * scale);
     h = Math.round(bmp.height * scale);

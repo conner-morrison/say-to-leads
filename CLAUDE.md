@@ -9,12 +9,38 @@ development. Later the analyzer is switched to the Claude API (`analyzer.mode = 
 1. Bridge must be running: `python3 bridge/bridge.py` (user usually starts it in a terminal;
    otherwise start it with `run_in_background`).
 2. Wait for a request: `python3 bridge/cli.py wait --timeout 600`
-   It prints the request id, the screenshot path, and the full prompt (job, page, events, history).
+   It prints the request id, the screenshot path, and the full prompt (feed position, page, events, history).
 3. Look at the screenshot with the Read tool (`bridge/data/inbox/<id>.jpg`).
-4. Decide per the JOB text, then answer:
+4. Decide per the job the user gave in chat (it is not in the prompt), then answer:
    `python3 bridge/cli.py respond <id> '<json>'` (or `respond latest -` with JSON on stdin).
 5. Repeat. Only the newest request is live; older ones are auto-archived as superseded.
    The extension waits up to `analyzer.bridgeTimeoutSec` (default 900s) per request.
+
+## Feed
+
+Settings → Feed holds page URLs, one per line. Start opens nothing and does no job on its own; it
+sends screenshots and, while idle, makes small humanized mouse drifts / scroll-and-back moves
+(`human.idleMoveChance`, `human.idleScrollChance`). The first `next` action opens URL 1;
+when the job on a page is done, answer `next` again for the following URL (history is reset per
+page). After the last URL, `next` ends the run. The prompt's `FEED:` line shows `not opened yet` or
+`page i of n – <url>`. With an empty feed the run works on whatever the linked tab shows.
+
+Settings → First messages holds saved openers (`messages.first`); they appear in the prompt under
+`SAVED FIRST MESSAGES` and are used only when the job asks for one. `SEND MODE` (`messages.sendMode`)
+says whether to click Send (`auto`) or type, notify and pause for the human (`review`).
+
+## Inbox monitor
+
+Every `monitor.inboxEveryMin` minutes (Settings → Inbox monitor, default 60, 0 = off) the next request
+carries an `INBOX CHECK DUE` section with the previously seen top of the Messaging panel. Add to the
+answer `"inbox": {"top": "<first non-Sponsored name in the list>", "unread": [blue bold names], "accepted": [names
+above the previous top that are not unread]}` – the extension stores `top` and sends the Telegram note
+itself. Leave `inbox` out (it stays due) if the panel is collapsed; open it instead.
+
+## Jobs
+
+The job the user gives in chat is written down in `jobs/*.md` (e.g. `jobs/linkedin-connect.md`).
+Follow the current one in the debug loop and add layout lessons learned from screenshots to it.
 
 ## Answer format (must match `extension/lib/schema.js`)
 
@@ -34,7 +60,8 @@ development. Later the analyzer is switched to the Claude API (`analyzer.mode = 
 - Coordinates are normalized to the screenshot (0..1, origin top-left). Prefer `box`
   (whole target) – the extension picks a human-like point inside it. `x`/`y` and `selector` also work.
 - Types: click, double_click, hover, type (optional target, `clear`), key (`Enter`, `Escape`,
-  `Ctrl+A`…), scroll (`dy` px), wait (`ms`), notify (Telegram, `photo`), pause, stop.
+  `Ctrl+A`…), scroll (`dy` px), wait (`ms`), notify (Telegram, `photo`), next (page done → next feed
+  URL; later actions are skipped), pause, stop.
 - Keep 0–5 actions per turn and verify on the next screenshot. `"\n"` in `type` text is sent as
   Shift+Enter (newline without sending). Use `key: Enter` to send.
 - Empty `actions` is a valid answer ("nothing to do").

@@ -16,6 +16,7 @@ function render() {
   $('link').disabled = active;
   for (const k of ['cycles', 'analyses', 'actions', 'events']) $(k).textContent = state.stats[k];
   const bits = [];
+  if (state.feed && active) bits.push(`page ${state.feed.index + 1}/${state.feed.total}`);
   if (state.profile) bits.push(`profile ${state.profile}`);
   if (state.driver) bits.push(`driver ${state.driver}`);
   if (state.analyzer) bits.push(`AI ${state.analyzer}`);

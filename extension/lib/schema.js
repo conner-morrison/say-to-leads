@@ -1,7 +1,7 @@
 // The contract between the extension and any analyzer (Claude Code via bridge, or the API).
 // Keep bridge/cli.py ACTION_TYPES and CLAUDE.md in sync with this file.
 
-export const ACTION_TYPES = ['click', 'double_click', 'hover', 'type', 'key', 'scroll', 'wait', 'notify', 'pause', 'stop'];
+export const ACTION_TYPES = ['click', 'double_click', 'hover', 'type', 'key', 'scroll', 'wait', 'notify', 'next', 'pause', 'stop'];
 
 export const RESULT_SCHEMA = {
   type: 'object',
@@ -32,12 +32,24 @@ export const RESULT_SCHEMA = {
       },
     },
     next_check_sec: { anyOf: [{ type: 'number' }, { type: 'null' }] },
+    inbox: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['top', 'unread', 'accepted'],
+      description: 'Only when an INBOX CHECK is due and the Messaging panel is visible.',
+      properties: {
+        top: { type: 'string', description: 'Name of the first conversation in the Messaging list' },
+        unread: { type: 'array', items: { type: 'string' }, description: 'Names of unread (blue bold) conversations' },
+        accepted: { type: 'array', items: { type: 'string' }, description: 'People who newly appeared above the previous top without being unread' },
+      },
+    },
   },
 };
 
 export const SYSTEM_PROMPT = `You operate one browser tab on behalf of a human, through screenshots.
-Each turn you get a screenshot of the visible viewport, the job description, recent page events
-(new notifications / unread counters) and a short history of your previous turns.
+You may work through a feed: a list of page URLs opened one at a time in that tab, each only when
+you send "next". Each turn you get a screenshot of the visible viewport, your position in the feed, recent page
+events (new notifications / unread counters) and a short history of your previous turns on this page.
 
 Reply with JSON only, matching the schema:
 - summary: what you see and what you decided.
@@ -46,8 +58,11 @@ Reply with JSON only, matching the schema:
   click/double_click/hover need a target. "type" types text (optionally targets a field first; set
   clear=true to replace existing text). "key" presses a key or combo (Enter, Escape, Ctrl+A).
   "scroll" uses dy pixels. "wait" waits ms. "notify" messages the human on Telegram (photo=true to
-  attach the screenshot). "pause" pauses the run for the human. "stop" ends the run.
+  attach the screenshot). "next" means the job on this page is done: the next feed URL is opened (after
+  the last one the run ends) and actions after it are skipped. "pause" pauses the run for the human.
+  "stop" ends the run.
 - next_check_sec: when to look again (null = default pacing).
+- inbox: only when the prompt says an INBOX CHECK is due (see there); otherwise leave it out.
 
 Rules: act only on what you can see. After a meaningful action, verify on the next screenshot
 instead of chaining many blind steps. If unsure or something looks wrong (login wall, captcha,
@@ -58,7 +73,12 @@ const clamp01 = (v) => Math.min(1, Math.max(0, Number(v)));
 export function sanitizeResult(r) {
   if (!r || typeof r !== 'object') throw new Error('analyzer returned no object');
   const actions = Array.isArray(r.actions) ? r.actions : [];
+  const names = (v) => (Array.isArray(v) ? v.map(String).filter(Boolean) : []);
+  const inbox = r.inbox && typeof r.inbox === 'object' && typeof r.inbox.top === 'string'
+    ? { top: r.inbox.top.trim(), unread: names(r.inbox.unread), accepted: names(r.inbox.accepted) }
+    : null;
   return {
+    inbox,
     summary: String(r.summary || ''),
     next_check_sec: typeof r.next_check_sec === 'number' && r.next_check_sec >= 0 ? r.next_check_sec : null,
     actions: actions

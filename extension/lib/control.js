@@ -48,6 +48,7 @@ export class RunControl {
   }
 
   set(status) {
+    if (this.stopped && status !== 'idle') return; // a stop from inside the loop stays stopped
     if (this.paused && status !== 'paused' && status !== 'idle') return; // stay visibly paused
     this.status = status;
     this.onChange(status);

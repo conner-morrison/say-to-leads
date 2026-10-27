@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <title>Say To Leads – Settings</title>
+    <link rel="icon" href="../icons/icon32.png" />
     <link rel="stylesheet" href="../ui.css" />
     <style>
       body { max-width: 760px; margin: 0 auto; padding: 16px; }
@@ -16,6 +17,10 @@
       .field.check input { width: auto; }
       .bar { position: sticky; bottom: 0; background: var(--bg); padding: 10px 0; display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--line); }
       #msg { color: var(--muted); }
+      .list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+      .list:empty { display: none; }
+      .list-item { display: flex; gap: 8px; align-items: flex-start; }
+      .list-num { min-width: 1.5em; padding-top: 6px; color: var(--muted); text-align: right; }
     </style>
   </head>
   <body>
