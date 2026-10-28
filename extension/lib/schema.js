@@ -3,6 +3,12 @@
 
 export const ACTION_TYPES = ['click', 'double_click', 'hover', 'type', 'key', 'scroll', 'browse', 'wait', 'notify', 'next', 'pause', 'stop'];
 
+// Error alarms the analyzer can raise with notify; the extension sends them and stops the run.
+export const ALERT_KINDS = ['weekly_limit', 'linkedin_error'];
+
+// Per-page results reported with "next", counted for the weekly summary.
+export const OUTCOMES = ['sent', 'pending', 'error'];
+
 export const RESULT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -27,6 +33,8 @@ export const RESULT_SCHEMA = {
           ms: { type: 'number' },
           sec: { type: 'number', description: 'browse: how long to read the page (default 25-70 random)' },
           photo: { type: 'boolean', description: 'notify: attach the screenshot' },
+          outcome: { type: 'string', enum: OUTCOMES, description: 'next: what happened on the page that is done' },
+          alert: { type: 'string', enum: ALERT_KINDS, description: 'notify: this is an error alarm – the run stops after it' },
           clear: { type: 'boolean', description: 'type: clear the field first' },
           reason: { type: 'string' },
         },
@@ -60,7 +68,9 @@ Reply with JSON only, matching the schema:
   clear=true to replace existing text). "key" presses a key or combo (Enter, Escape, Ctrl+A).
   "scroll" uses dy pixels. "browse" reads the whole page like a person (random scrolls to any depth,
   pauses, then back to the top) without screenshots – optional sec. "wait" waits ms. "notify" messages the human on Telegram (photo=true to
-  attach the screenshot). "next" means the job on this page is done: the next feed URL is opened (after
+  attach the screenshot; alert="weekly_limit" or "linkedin_error" marks an error alarm, and the run
+  stops right after it, so do any cleanup such as Escape before it). "next" means the job on this page is done (outcome = what happened there, when the job
+  asks for it): the next feed URL is opened (after
   the last one the run ends) and actions after it are skipped. "pause" pauses the run for the human.
   "stop" ends the run.
 - next_check_sec: when to look again (null = default pacing).
@@ -69,7 +79,7 @@ Reply with JSON only, matching the schema:
 Rules: if FEED says "not opened yet", the job has not started: answer only "next" (or nothing).
 Act only on what you can see. After a meaningful action, verify on the next screenshot
 instead of chaining many blind steps. If unsure or something looks wrong (login wall, captcha,
-error, unexpected page), use notify and pause rather than guessing. Empty actions is fine.`;
+error, unexpected page), use notify with alert "linkedin_error" (photo) rather than guessing. Empty actions is fine.`;
 
 const clamp01 = (v) => Math.min(1, Math.max(0, Number(v)));
 

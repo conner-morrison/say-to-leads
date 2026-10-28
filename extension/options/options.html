@@ -12,6 +12,14 @@
       .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px 14px; }
       .field.wide { grid-column: 1 / -1; }
       .field label { display: block; font-weight: 600; margin-bottom: 3px; }
+      h2.with-btn { display: flex; justify-content: space-between; align-items: center; }
+      h2.with-btn button { text-transform: none; letter-spacing: normal; font-size: 12px; }
+      .reg-row { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+      .reg-status { font-weight: 600; }
+      .reg-status.ready { color: var(--ok); }
+      .reg-status.pending, .reg-status.registered { color: var(--warn); }
+      .reg-status.rejected, .reg-status.err { color: var(--danger); }
+      #regDetail { margin-top: 6px; white-space: pre-line; }
       .field .help { font-size: 11px; color: var(--muted); margin-top: 2px; }
       .field.check label { display: flex; gap: 6px; align-items: center; font-weight: 500; }
       .field.check input { width: auto; }
@@ -26,6 +34,27 @@
   <body>
     <h1>Say To Leads – Settings</h1>
     <div id="hw" class="muted small"></div>
+    <div class="card" id="reg">
+      <h2>Registration</h2>
+      <div class="grid">
+        <div class="field">
+          <label for="regName">Name of this extension</label>
+          <input id="regName" type="text" maxlength="64" placeholder="e.g. rob-linkedin-1" />
+          <div class="help">Its own name on the server (Say To Leads is the kind of extension).</div>
+        </div>
+        <div class="field">
+          <label for="regUrl">Server URL</label>
+          <input id="regUrl" type="url" />
+          <div class="help">The server this extension registers with and takes URLs from.</div>
+        </div>
+      </div>
+      <div class="reg-row">
+        <button id="register" type="button" class="primary">Register</button>
+        <button id="forget" type="button" class="danger">Forget registration</button>
+        <span id="regStatus" class="reg-status"></span>
+      </div>
+      <div id="regDetail" class="help"></div>
+    </div>
     <form id="form"></form>
     <div class="bar">
       <button id="save" class="primary">Save</button>

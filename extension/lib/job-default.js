@@ -13,17 +13,24 @@ shows now is not part of the job, even if it is a profile. Never connect with an
 1. Find the action row in the profile header (left main column, under the name/headline/connections):
    e.g. "Connect · Message · More" (2nd degree) or "Message · + Follow · More" (3rd degree).
    Ignore buttons in the right-hand "More profiles for you" column, ads, and the Messaging panel.
-2. If the row shows "Pending" → the invitation was already sent: answer "next".
+Every "next" carries an outcome: "sent" (the invitation went out on this page), "pending" (it showed
+Pending already), or "error" (anything else that kept the invitation from being sent).
+
+2. If the row shows "Pending" → the invitation was already sent: answer {"type":"next","outcome":"pending"}.
+   If the page is not a working profile (page not found, "This page doesn't exist", unavailable profile,
+   wrong URL) → {"type":"next","outcome":"error"}.
 3. If the row shows "Connect" → click it. Otherwise click "More" (or "…"); a dropdown opens (often above
-   the button) – click "Connect" in it. No Connect there either → press Escape, then "next".
+   the button) – click "Connect" in it. No Connect there either → press Escape, then next with outcome "error".
 4. A modal "Add a note to your invitation?" appears.
    - Click the white "Add a note" button. NEVER click the blue "Send without a note".
-   - If there is no "Add a note" button (Premium is gone): notify "premium is gone", press Escape, pause.
-   - If instead a message says the weekly invitation limit is reached: notify "stopped for the weekly
-     limit" (photo), then stop.
+   - If there is no "Add a note" button (Premium is gone): press Escape, then notify "premium is gone"
+     with alert "linkedin_error" (photo).
+   - If instead a message says the weekly invitation limit is reached: press Escape, then notify
+     "stopped for the weekly limit" with alert "weekly_limit" (photo).
 5. In the note box (counter "0/300"), type the saved first message named in MESSAGE FOR THIS PAGE, with the
    person's first name after "Hi": every saved message starts with "Hi" on its own line; replace that line
    with "Hi <FirstName>," and keep the rest exactly as saved (same line breaks, use \\n in the text).
+   If the prompt has LEAD FOR THIS PAGE, take the first name from that name, not from the page.
    First name = first word of the profile name without emoji, titles or credentials
    ("Sr.Henrich Rahn" → "Henrich", "Dr. Anna-Maria Smith, PhD" → "Anna-Maria"). If unclear, use "Hi,".
    The whole note must be ≤ 300 characters; if it would not fit, use another saved message.
@@ -32,8 +39,9 @@ shows now is not part of the job, even if it is a profile. Never connect with an
    - review: notify "Review: note typed for <Full Name> – check it, click Send, then Resume" (photo) and pause.
    - auto: click the blue "Send" button in the note box.
 7. After sending (or after the human resumed): a toast at the bottom-left says "Invitation sent to <Name>"
-   and the row shows "Pending" → answer "next". If the toast is an error about the weekly invitation limit
-   → notify "stopped for the weekly limit" (photo), then stop.
+   and the row shows "Pending" → answer next with outcome "sent". If the toast is an error about the weekly invitation limit
+   → notify "stopped for the weekly limit" with alert "weekly_limit" (photo).
 
 Safety: one step per turn, verify on the next screenshot. Escape closes LinkedIn modals without sending.
-If something unexpected appears (login page, captcha, security check, error), notify (photo) and pause.`;
+If something unexpected appears (login page, captcha, security check, error), notify what you see with
+alert "linkedin_error" (photo). Alert notifies stop the run, so put them last.`;

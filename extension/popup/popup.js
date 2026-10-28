@@ -2,11 +2,24 @@ const $ = (id) => document.getElementById(id);
 const send = (msg) => chrome.runtime.sendMessage(msg);
 let state = null;
 
+const RELAY_PILL = {
+  none: ['not registered', 'idle'],
+  rejected: ['declined', 'stopped'],
+  pending: ['approval…', 'break'],
+  registered: ['watching', 'waiting'],
+  ready: ['watching', 'waiting'],
+};
+
 function render() {
   if (!state) return;
   const s = state.status;
-  $('status').textContent = s === 'waiting_ai' ? 'waiting AI' : s;
-  $('status').className = `pill ${s}`;
+  // While idle, the pill says where the server registration stands: "watching" = waiting for the server's trigger.
+  const idle = s === 'idle' && state.source === 'server' && RELAY_PILL[state.relay?.status];
+  const [text, cls] = idle ? (state.relay.status === 'ready' && state.blocked ? ['stopped', 'stopped'] : idle) : [s === 'waiting_ai' ? 'waiting AI' : s, s];
+  $('status').textContent = text;
+  $('status').className = `pill ${cls}`;
+  $('status').title = state.relay?.name ? `${state.relay.name} · ${state.relay.status}` : '';
+  $('name').textContent = state.relay?.name || '';
   $('tabTitle').textContent = state.tabTitle || (state.tabId ? `tab #${state.tabId}` : '— none —');
   const active = s !== 'idle';
   $('start').disabled = active || !state.tabId;
@@ -18,6 +31,7 @@ function render() {
   for (const k of ['cycles', 'analyses', 'actions', 'events']) $(k).textContent = state.stats[k];
   const bits = [];
   if (state.feed && active) bits.push(`page ${state.feed.index + 1}/${state.feed.total}`);
+  if (state.queued) bits.push(`${state.queued} lead${state.queued > 1 ? 's' : ''} in queue`);
   if (state.profile) bits.push(`profile ${state.profile}`);
   if (state.driver) bits.push(`driver ${state.driver}`);
   if (state.analyzer) bits.push(`AI ${state.analyzer}`);

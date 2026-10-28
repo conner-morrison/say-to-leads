@@ -7,6 +7,9 @@ export const DEFAULTS = {
     // Pages to work through, one URL per line, opened in the linked tab in order. Start opens
     // nothing; each "next" action from the analyzer opens the following URL.
     feed: '',
+    // Where the URLs come from: 'server' = the relay server sends them (Settings → Registration),
+    // queued and worked through in arrival order; 'urls' = the list in `feed` below.
+    source: 'server',
     // What the analyzer should do on each page. Sent with every request (cached as part of the
     // system prompt in Claude API mode). In bridge mode Claude Code also follows jobs/*.md.
     job: DEFAULT_JOB,
@@ -69,10 +72,15 @@ export const DEFAULTS = {
     enabled: false,
     botToken: '',
     chatId: '',
-    notifyOnStartStop: true,
-    notifyOnEvents: true, // forward detected notifications / new messages
-    sendScreenshotOnEvent: false,
-    commandsEnabled: false, // accept /pause /resume /stop /status /shot from the chat
+    // Which alarms to send. Weekly limit, LinkedIn and extension errors also stop the run (always),
+    // so a human checks and presses Start again.
+    alerts: {
+      newMessage: true, // unread conversations in the Messaging panel
+      accepted: true, // someone accepted an invitation (new name on top of the Messaging panel)
+      weeklyLimit: true, // LinkedIn's weekly invitation limit was hit
+      linkedinError: true, // anything else wrong on LinkedIn: Premium gone, login wall, captcha, error page
+      extensionError: true, // the extension itself failed (crash, API/bridge error, failed action, debugger)
+    },
   },
   watch: {
     titleBadge: true, // "(3) Inbox" style unread counters in the tab title

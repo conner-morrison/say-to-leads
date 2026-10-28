@@ -27,6 +27,9 @@ export function buildUserText(req) {
   const pick = req.firstMessages?.length && req.pickedMessage != null
     ? `\n\nMESSAGE FOR THIS PAGE: #${req.pickedMessage + 1} (picked at random for this page)`
     : '';
+  const lead = req.lead?.name
+    ? `\n\nLEAD FOR THIS PAGE (from the server): ${req.lead.name} – use this name; don't read it from the page.`
+    : '';
   const send = req.sendMode === 'auto'
     ? 'auto – after typing a message, click Send yourself.'
     : 'review – after typing a message, do NOT click Send: notify the human and pause; they send it and resume.';
@@ -38,7 +41,7 @@ export function buildUserText(req) {
 Previous top: ${ib.lastTop ? `"${ib.lastTop}" (${new Date(ib.lastAt).toLocaleString()})` : '(none – first check, accepted = [])'}.
 Conversations listed above the previous top that are NOT unread are people who accepted the invitation
 (put them in accepted). If the panel is collapsed, click its header to open it and leave "inbox" out this turn.`;
-  return `FEED: ${feed}${first}${pick}\n\nSEND MODE: ${send}${inbox}\n\nPAGE: ${req.page.title}\nURL: ${req.page.url}\nLOCAL TIME: ${new Date(req.created).toString()}\n\nNEW PAGE EVENTS:\n${ev}\n\nRESULT OF YOUR LAST ACTIONS:\n${last}\n\nRECENT HISTORY:\n${hist}`;
+  return `FEED: ${feed}${lead}${first}${pick}\n\nSEND MODE: ${send}${inbox}\n\nPAGE: ${req.page.title}\nURL: ${req.page.url}\nLOCAL TIME: ${new Date(req.created).toString()}\n\nNEW PAGE EVENTS:\n${ev}\n\nRESULT OF YOUR LAST ACTIONS:\n${last}\n\nRECENT HISTORY:\n${hist}`;
 }
 
 // The job is fixed for a run, so it belongs with the system prompt (cacheable), not the per-turn text.

@@ -18,7 +18,8 @@ export class Telegram {
     return `https://api.telegram.org/bot${this.cfg.botToken}/${method}`;
   }
 
-  async send(text, photoBlob = null, { dedupe = true } = {}) {
+  // html: text uses Telegram's HTML markup (e.g. <pre> for a monospace table).
+  async send(text, photoBlob = null, { dedupe = true, html = false } = {}) {
     if (!this.ready) return false;
     const now = Date.now();
     for (const [k, t] of this.recent) if (now - t > 60_000) this.recent.delete(k);
@@ -36,7 +37,7 @@ export class Telegram {
         res = await fetch(this.api('sendMessage'), {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ chat_id: this.cfg.chatId, text: text.slice(0, 4000), disable_web_page_preview: true }),
+          body: JSON.stringify({ chat_id: this.cfg.chatId, text: text.slice(0, 4000), disable_web_page_preview: true, ...(html && { parse_mode: 'HTML' }) }),
         });
       }
       const body = await res.json();

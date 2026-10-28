@@ -29,6 +29,27 @@ Settings → First messages holds saved openers (`messages.first`); they appear 
 `SAVED FIRST MESSAGES` and are used only when the job asks for one. `SEND MODE` (`messages.sendMode`)
 says whether to click Send (`auto`) or type, notify and pause for the human (`review`).
 
+## Relay server (registration + URL trigger)
+
+Settings → Registration registers the extension, under its own name, with a relay workspace
+(default `https://relay-production-7643.up.railway.app/upwork`; client in `extension/lib/relay.js`).
+Flow: `POST {url}/enrol {name,label}` → ticket → long-poll `GET {url}/enrol/{ticket}?wait=25` until an
+admin approves (→ worker id; 404 = declined) → long-poll `GET {url}/messages?wait=25` with
+`Authorization: Bearer <id>` → `POST {url}/ack {channel,seq}`. Status: none → pending → registered (no
+channel) → ready (channel allocated; the server only reveals channels through messages/notices).
+Settings → Feed & job → "URLs come from" (`task.source`): `server` or `urls` (the Settings list).
+
+Server mode (leads = URL + name, parsed by `leadsIn` in relay.js):
+- Start: leads left in the persistent FIFO queue (`relayQueue`) come first; if it is empty, fetch the next
+  ≤10 messages (`GET /messages?limit=10`), queue their leads, reply `{"status":"fetched", url, name, job_id,
+  reply_to}` to each in its channel (`POST /publish`, id `fetched:<channel>:<seq>:<i>`), then ack (cursor
+  moves right after the last fetched). Nothing on the server → no run, status "watching".
+- A queue head leaves the queue only when its page is done (`next`), so an error halt keeps it for the next
+  Start. Queue empty → fetch again → none → run ends → watching.
+- Watching = a long poll (`limit=1&wait=25`) used only as a trigger; any message/notice → fetch → auto-start.
+  A running run ignores triggers (the watch loop is off). Error alarms set `state.blocked`: no auto-start.
+- The lead's name goes to the AI as `LEAD FOR THIS PAGE`, so it is not read from the page.
+
 ## Inbox monitor
 
 Every `monitor.inboxEveryMin` minutes (Settings → Inbox monitor, default 60, 0 = off) the next request
@@ -70,8 +91,10 @@ Follow the current one in the debug loop and add layout lessons learned from scr
   (whole target) – the extension picks a human-like point inside it. `x`/`y` and `selector` also work.
 - Types: click, double_click, hover, type (optional target, `clear`), key (`Enter`, `Escape`,
   `Ctrl+A`…), scroll (`dy` px), browse (reads the whole page by itself – random depths, pauses,
-  back to top – with no screenshots; optional `sec`), wait (`ms`), notify (Telegram, `photo`), next (page done → next feed
-  URL; later actions are skipped), pause, stop.
+  back to top – with no screenshots; optional `sec`), wait (`ms`), notify (Telegram, `photo`; `alert: "weekly_limit" | "linkedin_error"` marks an
+  error alarm – the extension sends it if enabled and stops the run), next (page done → next feed
+  URL; later actions are skipped; `outcome: sent | pending | error` counts toward the weekly summary that
+  goes to Telegram when the weekly limit stops the run, then resets), pause, stop.
 - Keep 0–5 actions per turn and verify on the next screenshot. `"\n"` in `type` text is sent as
   Shift+Enter (newline without sending). Use `key: Enter` to send.
 - Empty `actions` is a valid answer ("nothing to do").

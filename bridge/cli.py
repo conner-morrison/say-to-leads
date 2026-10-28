@@ -17,6 +17,7 @@ DATA = Path(__file__).resolve().parent / "data"
 INBOX, OUTBOX, MIRROR = DATA / "inbox", DATA / "outbox", DATA / "mirror"
 
 # Keep in sync with extension/lib/schema.js
+ALERT_KINDS = ["weekly_limit", "linkedin_error"]
 ACTION_TYPES = {"click", "double_click", "hover", "type", "key", "scroll", "browse", "wait", "notify", "next", "pause", "stop"}
 
 
@@ -83,6 +84,10 @@ def validate(obj):
             "selector" in a or "box" in a or ("x" in a and "y" in a)
         ):
             raise ValueError(f"action {i}: {a['type']} needs box, x/y or selector")
+        if "alert" in a and (a["type"] != "notify" or a["alert"] not in ALERT_KINDS):
+            raise ValueError(f"action {i}: alert goes on notify and must be one of {ALERT_KINDS}")
+        if "outcome" in a and (a["type"] != "next" or a["outcome"] not in ("sent", "pending", "error")):
+            raise ValueError(f"action {i}: outcome goes on next and must be sent, pending or error")
         if "box" in a and (not isinstance(a["box"], list) or len(a["box"]) != 4):
             raise ValueError(f"action {i}: box must be [x1,y1,x2,y2]")
     ib = obj.get("inbox")

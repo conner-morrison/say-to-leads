@@ -12,14 +12,16 @@ Do this on each page, then answer `next`.
    Skip browsing only when resuming on a profile that was already browsed (history shows it).
 1. Find the profile's action row under the headline: **Message**, **+ Follow**, **More**
    (only the row in the profile header – not the "More profiles for you" column on the right).
-2. If that row shows **Pending** → the invitation was already sent: do nothing, `next`.
+   Every `next` carries an `outcome` for the weekly summary: `sent`, `pending`, or `error`.
+2. If that row shows **Pending** → the invitation was already sent: do nothing, `next` (`outcome: pending`).
+   Not a working profile (page not found, unavailable, wrong URL) → `next` (`outcome: error`).
 3. If that row shows **Connect** → click it.
    Otherwise click **More** (or "…") and look for **Connect** in the dropdown → click it.
-   No Connect there either → close the dropdown (Escape) and `next`.
+   No Connect there either → close the dropdown (Escape) and `next` (`outcome: error`).
 4. A modal "Add a note to your invitation?" appears:
    - It has an **Add a note** button → click it.
-   - No **Add a note** button (Premium gone) → `notify` "premium is gone", close the modal
-     (Escape / ✕, never "Send without a note"), and `pause` the run.
+   - No **Add a note** button (Premium gone) → close the modal (Escape / ✕, never "Send without
+     a note"), then `notify` "premium is gone" with `"alert": "linkedin_error"` (stops the run).
 5. In the note box, type ONE of the saved first messages, chosen at random, like a human.
    Every message starts with "Hi": put the person's first name (from the profile header) after it:
    `Hi <FirstName>,\n\n<rest of the message>`.
@@ -28,15 +30,20 @@ Do this on each page, then answer `next`.
      confirm the row shows Pending, then `next`.
    - `auto`: click **Send**, confirm the row shows Pending, then `next`.
 7. After an invitation is sent, check the bottom-left of the screen for LinkedIn's toast:
-   - "Invitation sent…" or similar success → OK, carry on (Pending in the row confirms it too).
+   - "Invitation sent…" or similar success → `next` with `outcome: sent` (Pending in the row confirms it too).
    - An error about the **weekly invitation limit** (toast or modal, e.g. "You've reached the
-     weekly invitation limit") → `notify` "stopped for the weekly limit" (with photo), then `stop`.
+     weekly invitation limit") → `notify` "stopped for the weekly limit" with `"alert": "weekly_limit"`
+     (with photo); the run stops.
      Don't try further profiles.
    The toast fades after a few seconds, so look on the first screenshot after Send/Resume; if it is
    gone, rely on the row (Pending = sent). A limit error may also appear as a modal right after
    clicking Connect – treat it the same way.
 
 ## First name
+
+When the run works with server leads, the prompt has `LEAD FOR THIS PAGE: <name>` – take the first
+name from it instead of the page.
+
 
 Use the first word of the profile name, without emoji, credentials or titles
 ("Dr. Anna-Maria Smith, PhD" → "Anna-Maria"). If the name is unclear, use the

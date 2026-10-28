@@ -1,11 +1,17 @@
 import { DEFAULTS, loadSettings, saveSettings } from '../lib/settings.js';
 import { detectHardware, resolveProfile } from '../lib/profiles.js';
+import { DEFAULT_RELAY_URL } from '../lib/relay.js';
 
 // [path, label, type, extra]. type: text | number | textarea | check | select | password | time | list
 const SECTIONS = [
   ['Feed & job', [
+    ['task.source', 'URLs come from', 'select', {
+      wide: true,
+      options: [['server', 'Server – registered extension; leads (URL + name) come from the server'], ['urls', 'URL list – the page URLs entered below']],
+      help: 'Server: leads are fetched 10 at a time into a queue and handled oldest first; when the queue is empty the next ones are fetched, and with none left it watches for the server\'s new-lead trigger. URL list: press Start to work through the list below.',
+    }],
     ['task.job', 'Job (what to do on each page)', 'textarea', { wide: true, rows: 14, help: 'Instructions the AI follows on every page. Clear the box and save to restore the default LinkedIn connect job.' }],
-    ['task.feed', 'Page URLs, one per line', 'textarea', { wide: true, rows: 8, help: 'Opened in the linked tab in this order, one at a time, when the analyzer asks for the next page (Start itself opens nothing). The run ends after the last URL. Lines starting with # are skipped.' }],
+    ['task.feed', 'Page URLs, one per line', 'textarea', { wide: true, rows: 8, help: 'Used when "URLs come from" is URL list. Opened in the linked tab in this order, one at a time, when the analyzer asks for the next page (Start itself opens nothing). The run ends after the last URL. Lines starting with # are skipped.' }],
     ['task.forceAnalyzeEverySec', 'Force analysis every (sec)', 'number', { help: 'Even if the screen looks unchanged.' }],
     ['task.changeThreshold', 'Change threshold (0-255)', 'number', { help: 'Lower = more sensitive = more AI calls.' }],
     ['task.historyLength', 'History turns sent', 'number'],
@@ -67,7 +73,7 @@ const SECTIONS = [
     ['human.breakEveryMaxMin', 'Break every max (min)', 'number'],
     ['human.breakLenMinMin', 'Break length min (min)', 'number'],
     ['human.breakLenMaxMin', 'Break length max (min)', 'number'],
-  ]],
+  ], { reset: 'human' }],
   ['Watchers', [
     ['watch.titleBadge', 'Detect "(3)" unread counters in title', 'check'],
     ['watch.notificationApi', 'Detect web notifications', 'check'],
@@ -77,10 +83,11 @@ const SECTIONS = [
     ['telegram.enabled', 'Enabled', 'check'],
     ['telegram.botToken', 'Bot token', 'password', { help: 'From @BotFather.' }],
     ['telegram.chatId', 'Chat ID', 'text', { help: 'Message your bot, then open api.telegram.org/bot<token>/getUpdates.' }],
-    ['telegram.notifyOnStartStop', 'Notify start/stop', 'check'],
-    ['telegram.notifyOnEvents', 'Forward detected events', 'check'],
-    ['telegram.sendScreenshotOnEvent', 'Attach screenshot to events', 'check'],
-    ['telegram.commandsEnabled', 'Accept /pause /resume /stop /status /shot', 'check'],
+    ['telegram.alerts.newMessage', 'New message', 'check', { help: 'Unread (blue bold) conversations in the Messaging panel.' }],
+    ['telegram.alerts.accepted', 'New acceptance', 'check', { help: 'Someone accepted your invitation.' }],
+    ['telegram.alerts.weeklyLimit', 'Weekly limit', 'check', { help: 'Invitation not sent: weekly limit reached. The run stops.' }],
+    ['telegram.alerts.linkedinError', 'LinkedIn error', 'check', { help: 'Premium gone, login wall, captcha, error page… The run stops.' }],
+    ['telegram.alerts.extensionError', 'Extension error', 'check', { help: 'Any error of the extension itself (crash, API, failed action). The run stops.' }],
   ]],
 ];
 
@@ -95,10 +102,23 @@ const form = document.getElementById('form');
 const msg = (t) => (document.getElementById('msg').textContent = t);
 
 function build() {
-  for (const [title, fields] of SECTIONS) {
+  for (const [title, fields, opts = {}] of SECTIONS) {
     const card = document.createElement('div');
     card.className = 'card';
     card.innerHTML = `<h2>${title}</h2><div class="grid"></div>`;
+    if (opts.reset) {
+      // Loads the defaults for this section's fields only; Save keeps them.
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = 'Default';
+      btn.onclick = () => {
+        fill(DEFAULTS, `${opts.reset}.`);
+        msg(`${title} defaults loaded – press Save to keep them`);
+      };
+      const h2 = card.querySelector('h2');
+      h2.classList.add('with-btn');
+      h2.append(btn);
+    }
     const grid = card.querySelector('.grid');
     for (const [path, label, type, extra = {}] of fields) {
       const f = document.createElement('div');
@@ -175,8 +195,9 @@ function renumber(list) {
   list.querySelectorAll('.list-num').forEach((n, i) => (n.textContent = `${i + 1}.`));
 }
 
-function fill(s) {
+function fill(s, prefix = '') {
   for (const el of form.querySelectorAll('[data-path]')) {
+    if (!el.dataset.path.startsWith(prefix)) continue;
     const v = get(s, el.dataset.path);
     if (el.dataset.kind === 'list') {
       el.textContent = '';
@@ -230,3 +251,78 @@ document.getElementById('testTelegram').onclick = async () => {
   const r = await chrome.runtime.sendMessage({ type: 'testTelegram' });
   msg(r.ok ? 'Telegram message sent ✓' : `Telegram error: ${r.error}`);
 };
+
+// ---------- registration with the relay server ----------
+
+const REG_TEXT = {
+  none: 'Not registered',
+  pending: 'Waiting for approval…',
+  registered: 'Registered – watching for leads',
+  ready: 'Registered – channel allocated',
+  rejected: 'Declined',
+};
+
+function renderRelay(r, { prefill = false } = {}) {
+  if (prefill) {
+    document.getElementById('regName').value = r.name || '';
+    document.getElementById('regUrl').value = r.url || DEFAULT_RELAY_URL;
+  }
+  const el = document.getElementById('regStatus');
+  el.textContent = REG_TEXT[r.status] || r.status;
+  el.className = `reg-status ${r.status}`;
+  const lines = [];
+  if (r.status === 'pending') {
+    lines.push('The request is on the server. It is approved there by a person; this page updates by itself.');
+    if (r.fingerprint) lines.push(`Fingerprint: ${r.fingerprint} – the server shows the same code next to the request.`);
+  }
+  if (r.workerId) lines.push(`ID from the server: ${r.workerId}`);
+  if (r.status === 'registered') lines.push('Leads arrive once the server has put it in a channel (the server does not say which, so the channel shows here after the first lead).');
+  if (r.status === 'ready') lines.push(`Channel: ${r.channels.map((c) => '#' + c).join(', ')} – leads are fetched from here.`);
+  if (r.status === 'rejected') lines.push('The server declined the request (or it expired). Register again to ask once more.');
+  if (r.error) lines.push(`⚠ ${r.error}`);
+  document.getElementById('regDetail').textContent = lines.join('\n');
+  document.getElementById('forget').disabled = r.status === 'none';
+}
+
+document.getElementById('register').onclick = async () => {
+  const name = document.getElementById('regName').value.trim();
+  const url = document.getElementById('regUrl').value.trim();
+  const { state: st } = await chrome.runtime.sendMessage({ type: 'getState' });
+  if (st.relay.status !== 'none' && !confirm('This replaces the current registration with a new request. Continue?')) return;
+  const el = document.getElementById('regStatus');
+  // The server sends no CORS headers, so the extension can only reach it with host access to its site.
+  // Chrome lets a user limit site access (Details → Site access), so ask for this one site explicitly.
+  let origin;
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    el.textContent = 'The server URL is not valid.';
+    el.className = 'reg-status err';
+    return;
+  }
+  const granted = await chrome.permissions.request({ origins: [`${origin}/*`] }).catch(() => false);
+  if (!granted) {
+    el.textContent = `No access to ${origin} – allow it (Details → Site access) and try again.`;
+    el.className = 'reg-status err';
+    return;
+  }
+  el.textContent = 'Sending…';
+  el.className = 'reg-status pending';
+  const r = await chrome.runtime.sendMessage({ type: 'relayRegister', name, url });
+  if (!r.ok) {
+    el.textContent = r.error;
+    el.className = 'reg-status err';
+  }
+};
+document.getElementById('forget').onclick = async () => {
+  if (!confirm('Forget this registration? The extension stops taking URLs from the server until it is registered again.')) return;
+  await chrome.runtime.sendMessage({ type: 'relayForget' });
+};
+
+chrome.runtime.onMessage.addListener((m) => {
+  if (m.type === 'state' && m.state.relay) renderRelay(m.state.relay);
+});
+{
+  const r = await chrome.runtime.sendMessage({ type: 'getState' });
+  if (r?.ok) renderRelay(r.state.relay, { prefill: true });
+}

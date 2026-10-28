@@ -4,6 +4,9 @@ header { display: flex; justify-content: space-between; align-items: center; }
 .pill.running { background: var(--ok); color: #fff; }
 .pill.paused, .pill.break { background: var(--warn); color: #fff; }
 .pill.waiting_ai { background: var(--primary); color: #fff; }
+.pill.waiting { background: var(--ok); color: #fff; }
+.pill.stopped { background: var(--danger); color: #fff; }
+header .name { flex: 1; margin-left: 8px; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .controls { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); text-align: center; margin-bottom: 6px; }
 .stats span { font-size: 18px; font-weight: 600; display: block; }

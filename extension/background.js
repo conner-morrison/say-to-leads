@@ -8,6 +8,7 @@ import { log, getLogs, clearLogs, setVerbose } from './lib/logger.js';
 import { captureTab, diffThumbs, blobToBase64 } from './lib/capture.js';
 import { analyze, bridgeHealth, buildUserText, estimateCost, mirrorTurn } from './lib/analyzer.js';
 import { Telegram } from './lib/telegram.js';
+import { RelayClient, EMPTY as RELAY_EMPTY, leadsIn } from './lib/relay.js';
 import { CdpBackend, DomBackend, HumanInput } from './lib/input.js';
 import { humanBetween, pointInBox, jitterPoint, chance, rnd, clamp } from './lib/human.js';
 
@@ -24,6 +25,10 @@ const state = {
   nextBreakAt: null,
   aiWaitingSince: null,
   error: null,
+  blocked: false, // set by an error alarm: no automatic start until a human presses Start
+  relay: { ...RELAY_EMPTY }, // registration with the relay server (see lib/relay.js)
+  source: 'server', // where URLs come from: 'server' (relay queue) | 'urls' (Settings list)
+  queued: 0, // URLs from the server waiting in the queue
 };
 
 const ctl = new RunControl((status) => {
@@ -48,13 +53,144 @@ const sendToTab = (tabId, m) => chrome.tabs.sendMessage(tabId, { stl: true, ...m
   if (saved) {
     state.tabId = saved.tabId;
     state.tabTitle = saved.tabTitle;
-    if (saved.status && saved.status !== 'idle') {
-      state.error = 'Extension worker restarted – press Start to continue.';
-      log.warn(state.error);
-    }
+    state.blocked = !!saved.blocked;
+    if (saved.status && saved.status !== 'idle') await halt('extension_error', 'the extension worker restarted, the run was lost');
   }
   publish();
+  await applySource();
+  await relay.load();
+  maybeAutoStart();
 })();
+
+// ---------- relay server ----------
+
+const relay = new RelayClient({
+  onChange: (v) => {
+    state.relay = v;
+    syncRelayKeepAlive();
+    publish();
+  },
+  onTrigger: () => onServerTrigger().catch((e) => log.warn(`Lead fetch failed: ${e.message}`)),
+});
+
+// The long poll alone does not keep an MV3 worker alive; a periodic extension call does. The alarm
+// wakes a worker that was stopped anyway, and loading the module resumes the poll.
+let relayKeepAlive = null;
+function syncRelayKeepAlive() {
+  const on = ['pending', 'registered', 'ready'].includes(state.relay.status);
+  if (on && !relayKeepAlive) {
+    relayKeepAlive = setInterval(() => chrome.runtime.getPlatformInfo(), 20_000);
+    chrome.alarms.create('relay', { periodInMinutes: 1 });
+  } else if (!on && relayKeepAlive) {
+    clearInterval(relayKeepAlive);
+    relayKeepAlive = null;
+    chrome.alarms.clear('relay');
+  }
+}
+chrome.alarms.onAlarm.addListener((a) => a.name === 'relay' && relay.ensureLoop());
+
+// Settings → Feed & job → "URLs come from": the server (registration + lead queue) or the URL list.
+async function applySource() {
+  const s = await loadSettings();
+  state.source = s.task.source;
+  syncWatch();
+  state.queued = (await readQueue()).length;
+  publish();
+}
+chrome.storage.onChanged.addListener((ch, area) => area === 'local' && ch.settings && applySource());
+
+// "Watching": idle in server mode, holding a question open for the server's "new leads" trigger.
+// While a run works through its queue, triggers are ignored (not even asked for); the run fetches
+// the next leads itself when the queue is empty.
+function syncWatch() {
+  relay.setConsume(state.source === 'server' && !run);
+}
+
+// ---------- lead queue (server mode) ----------
+//
+// Leads wait in a persistent FIFO queue (chrome.storage.local, survives restarts and errors).
+// The head is the lead being worked on; it leaves the queue only when its page is done ("next"),
+// so a run stopped by an error starts again on the same lead.
+
+const FETCH_LIMIT = 10;
+let queueOp = Promise.resolve();
+async function readQueue() {
+  const { relayQueue = [] } = await chrome.storage.local.get('relayQueue');
+  return relayQueue.map((l) => (typeof l === 'string' ? { url: l, name: null, key: l } : l)); // older versions stored bare URLs
+}
+function withQueue(fn) {
+  const op = queueOp.then(async () => {
+    const q = await readQueue();
+    const out = await fn(q);
+    await chrome.storage.local.set({ relayQueue: q });
+    state.queued = q.length;
+    if (run?.server && state.feed) state.feed.total = Math.max(state.feed.index, 0) + q.length;
+    return out;
+  });
+  queueOp = op.catch(() => {});
+  return op;
+}
+
+// Fetch up to 10 leads from right after the last fetch: queue them, reply "fetched" to each lead on the
+// server, then acknowledge, which moves this extension's cursor past them. Returns how many were queued.
+let fetchOp = Promise.resolve(0);
+function fetchLeads() {
+  const op = fetchOp.then(async () => {
+    const { messages } = await relay.get({ limit: FETCH_LIMIT });
+    if (!messages.length) return 0;
+    const last = {};
+    const leads = [];
+    for (const m of messages) {
+      if (m.channel && Number.isFinite(m.seq)) last[m.channel] = Math.max(last[m.channel] ?? -Infinity, m.seq);
+      if (m.sender && m.sender === state.relay.workerId) continue; // our own replies
+      if (m.body && typeof m.body === 'object' && m.body.status === 'fetched') continue; // anyone's fetched marks
+      const found = leadsIn(m);
+      if (!found.length) log.info(`Server message #${m.seq} has no lead (trigger or note) – skipped`);
+      leads.push(...found);
+    }
+    const added = await withQueue((q) => {
+      const have = new Set(q.map((l) => l.key));
+      const fresh = leads.filter((l) => !have.has(l.key));
+      q.push(...fresh);
+      return fresh;
+    });
+    for (const l of added) {
+      const reply = { status: 'fetched', url: l.url, ...(l.name && { name: l.name }), ...(l.job && { job_id: l.job }), reply_to: l.seq, by: state.relay.name };
+      await relay.publish(l.channel, reply, `fetched:${l.key}`).catch((e) => log.warn(`Fetched mark for ${l.name || l.url} failed: ${e.message}`));
+    }
+    await relay.ack(last);
+    if (added.length) await bumpStats({ fetched: added.length });
+    log.info(`Fetched ${added.length} lead(s) from the server – ${state.queued} in the queue`, added.map((l) => l.name || l.url));
+    publish();
+    return added.length;
+  });
+  fetchOp = op.catch(() => 0);
+  return op;
+}
+
+// The server's trigger while watching: fetch, then start working if anything came.
+async function onServerTrigger() {
+  if (run || state.source !== 'server') return; // a run ignores triggers; it fetches when its queue is empty
+  if ((await readQueue()).length) return maybeAutoStart(); // leads still to do (e.g. stopped by an error) come first
+  const n = await fetchLeads();
+  if (n) maybeAutoStart();
+}
+
+async function maybeAutoStart() {
+  if (ctl.active || run || state.blocked || state.source !== 'server' || !state.relay.workerId) return;
+  const q = await readQueue();
+  state.queued = q.length;
+  if (!q.length) return;
+  if (!state.tabId) {
+    log.warn(`${q.length} lead(s) are waiting – link a tab and press Start`);
+    return publish();
+  }
+  await start().catch((e) => {
+    log.warn(`Could not start on the queued leads: ${e.message}`);
+    state.error = e.message;
+    publish();
+  });
+}
 
 // ---------- messaging ----------
 
@@ -87,7 +223,14 @@ async function handle(msg, sender) {
       publish();
       return {};
     case 'start':
+      state.blocked = false; // a human checked and starts again
       await start();
+      return {};
+    case 'relayRegister':
+      await relay.register(msg.url, msg.name);
+      return {};
+    case 'relayForget':
+      await relay.forget();
       return {};
     case 'stop':
       await stop('stopped by user');
@@ -138,7 +281,25 @@ async function start() {
   if (!tab) throw new Error('Linked tab no longer exists – link a tab again.');
 
   const settings = await loadSettings();
-  const feed = parseFeed(settings.task.feed);
+  const server = settings.task.source === 'server';
+  if (server && !state.relay.workerId) {
+    throw new Error({
+      none: 'Register this extension with the server first (Settings → Registration).',
+      rejected: 'The server declined the registration – register again (Settings → Registration).',
+      pending: 'Waiting for the server to approve the registration.',
+    }[state.relay.status] || 'Not registered with the server.');
+  }
+
+  // Server mode: leads not handled yet come first; with none, fetch the next ones from the server.
+  // With nothing there either, there is no run: the extension watches for the server's trigger.
+  let queue = server ? await readQueue() : [];
+  if (server && !queue.length && (await fetchLeads())) queue = await readQueue();
+  if (server && !queue.length) {
+    log.info('No leads on the server – watching for new ones');
+    syncWatch();
+    return publish();
+  }
+  const feed = server ? [] : parseFeed(settings.task.feed);
   if (/^(chrome|edge|about|chrome-extension|devtools):/.test(tab.url || '')) throw new Error('Browser internal pages cannot be automated.');
 
   setVerbose(settings.debug.verbose);
@@ -154,6 +315,7 @@ async function start() {
     telegram,
     input: new HumanInput(backend, { profile, human: settings.human, ctl, tabId: tab.id, showCursor: settings.input.showCursor }),
     feed,
+    server,
     feedIndex: -1, // nothing opened yet; the first "next" opens feed[0]
     nextPage: false, // set by the "next" action, handled at the end of the cycle
     pick: pickMessage(settings), // saved first message to use on the current page (random per page)
@@ -173,22 +335,19 @@ async function start() {
     error: null,
     lastSummary: '',
     stats: { cycles: 0, analyses: 0, actions: 0, events: 0, cost: 0 },
-    feed: feed.length ? { index: -1, total: feed.length, url: feed[0] } : null,
+    feed: server ? { index: -1, total: queue.length, url: queue[0].url } : feed.length ? { index: -1, total: feed.length, url: feed[0] } : null,
   });
+  syncWatch(); // a run ignores the server's triggers
   scheduleBreak();
   ctl.start();
   keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(), 20_000); // keeps the MV3 worker alive while running
 
   log.info(`Started · profile=${profile.name} · analyzer=${settings.analyzer.mode} · driver=${backend.kind}`);
-  if (settings.telegram.notifyOnStartStop) telegram.send(`▶️ Started on: ${tab.title}`, null, { dedupe: false });
-  telegram.startPolling(onTelegramCommand);
 
   loop()
     .catch((e) => {
       if (e instanceof StopSignal || ctl.stopped) return;
-      log.error('Loop crashed', e.message);
-      state.error = e.message;
-      run?.telegram.send(`❌ Crashed: ${e.message}`, null, { dedupe: false });
+      return halt('extension_error', `loop crashed: ${e.message}`);
     })
     .finally(cleanup);
 }
@@ -196,8 +355,63 @@ async function start() {
 async function stop(reason) {
   if (!ctl.active) return;
   log.info(`Stopped: ${reason}`);
-  if (run?.settings.telegram.notifyOnStartStop) await run.telegram.send(`⏹ Stopped: ${reason}`, null, { dedupe: false });
   ctl.stop();
+}
+
+// Error alarms. Each one stops the run (whether or not its Telegram alarm is on), so a human
+// checks what happened and presses Start again.
+const ALERTS = {
+  weekly_limit: ['weeklyLimit', '⛔ Weekly limit'],
+  linkedin_error: ['linkedinError', '⚠️ LinkedIn error'],
+  extension_error: ['extensionError', '❌ Extension error'],
+};
+
+async function halt(kind, text, photo = null) {
+  const [key, label] = ALERTS[kind];
+  (kind === 'extension_error' ? log.error : log.warn)(`${label}: ${text}`);
+  state.error = `${label}: ${text} – check, then press Start.`;
+  state.blocked = true;
+  const settings = run?.settings ?? (await loadSettings());
+  if (settings.telegram.alerts[key]) {
+    const tg = run?.telegram ?? new Telegram(settings.telegram);
+    await tg.send(`${label}: ${text}\nThe run stopped – check and press Start again.`, photo, { dedupe: false }).catch(() => {});
+    if (kind === 'weekly_limit') await sendWeeklySummary(tg);
+  }
+  await stop(label);
+  publish();
+}
+
+// ---------- weekly summary ----------
+// Lead results since the last weekly-limit stop. When LinkedIn's weekly limit stops the run, they go to
+// Telegram as a table and start again from zero for the next week.
+
+const OUTCOME_FIELD = { sent: 'sent', pending: 'pending', error: 'error' };
+let statsOp = Promise.resolve();
+function bumpStats(delta) {
+  statsOp = statsOp.then(async () => {
+    const { weekStats: w = { since: Date.now(), fetched: 0, sent: 0, pending: 0, error: 0 } } = await chrome.storage.local.get('weekStats');
+    for (const [k, n] of Object.entries(delta)) w[k] = (w[k] || 0) + n;
+    await chrome.storage.local.set({ weekStats: w });
+  }).catch((e) => log.warn(`Weekly stats not saved: ${e.message}`));
+  return statsOp;
+}
+
+async function sendWeeklySummary(tg) {
+  await statsOp;
+  const { weekStats: w = { since: Date.now(), fetched: 0, sent: 0, pending: 0, error: 0 } } = await chrome.storage.local.get('weekStats');
+  // Left = leads not done yet; the one the limit stopped on is still at the head of the queue.
+  const left = run?.server || !run ? (await readQueue()).length : Math.max(run.feed.length - Math.max(run.feedIndex, 0), 0);
+  const notSent = [`${w.error} error`, `${w.pending} pending`, `${left} left`];
+  const cols = [['Fetched', [String(w.fetched)]], ['Not sent', notSent], ['Sent', [String(w.sent)]]];
+  const width = cols.map(([h, v]) => Math.max(h.length, ...v.map((x) => x.length)));
+  const row = (cells) => `| ${cells.map((c, i) => c.padEnd(width[i])).join(' | ')} |`;
+  const lines = [row(cols.map(([h]) => h)), row(width.map((n) => '-'.repeat(n)))];
+  for (let i = 0; i < notSent.length; i++) lines.push(row(cols.map(([, v]) => v[i] ?? '')));
+  const since = new Date(w.since).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const ok = await tg.send(`📊 <b>This week's connections</b> (since ${since})\n<pre>${esc(lines.join('\n'))}</pre>`, null, { dedupe: false, html: true });
+  log.info('Weekly summary', { ...w, left });
+  if (ok) await chrome.storage.local.set({ weekStats: { since: Date.now(), fetched: 0, sent: 0, pending: 0, error: 0 } });
 }
 
 async function cleanup() {
@@ -211,14 +425,13 @@ async function cleanup() {
     await r.backend.dispose();
   }
   publish();
+  syncWatch(); // idle again: watch for the server's trigger
 }
 
 function onDebuggerDetached(reason) {
   log.warn(`Debugger detached (${reason})`);
   if (!ctl.active) return;
-  if (reason === 'target_closed') return stop('linked tab was closed');
-  ctl.pause();
-  run?.telegram.send(`⚠️ Debugger detached (${reason}) – run paused. Press Resume to re-attach.`, null, { dedupe: false });
+  halt('extension_error', reason === 'target_closed' ? 'the linked tab was closed' : `debugger detached (${reason})`);
 }
 
 // ---------- feed ----------
@@ -260,16 +473,29 @@ async function navigate(tabId, url) {
 
 // Move the linked tab to feed entry i, or end the run after the last one.
 async function openFeedPage(i) {
+  if (run.server) {
+    // The lead before is done: it leaves the queue now (not when it opened), so an error keeps it queued.
+    const done = run.lead;
+    if (done) await withQueue((q) => q[0]?.key === done.key && q.shift());
+    run.lead = null;
+    let q = await readQueue();
+    if (!q.length && (await fetchLeads())) q = await readQueue(); // queue done → the next leads from the server
+    if (q.length) {
+      run.lead = q[0];
+      run.feed.push(q[0].url);
+    }
+  }
   const { feed } = run;
   if (i >= feed.length) {
-    log.info(`Feed finished (${feed.length} pages)`);
-    await stop('feed finished');
+    log.info(run.server ? `All leads done (${feed.length} this run) – watching the server for new ones` : `Feed finished (${feed.length} pages)`);
+    await stop(run.server ? 'queue empty' : 'feed finished');
     throw new StopSignal();
   }
   await ctl.sleep(humanBetween(1500, 4000)); // a person pauses before moving on
   run.feedIndex = i;
-  state.feed = { index: i, total: feed.length, url: feed[i] };
-  log.info(`Feed ${i + 1}/${feed.length}: ${feed[i]}`);
+  const total = run.server ? i + state.queued : feed.length;
+  state.feed = { index: i, total, url: feed[i] };
+  log.info(`Feed ${i + 1}/${total}: ${run.lead?.name ? `${run.lead.name} – ` : ''}${feed[i]}`);
   await navigate(state.tabId, feed[i]);
   // Fresh page, fresh short-term memory; analyze it right away.
   Object.assign(run, { history: [], lastActions: [], lastThumb: null, lastAnalysisAt: 0, events: [], pick: pickMessage(run.settings) });
@@ -343,9 +569,8 @@ async function loop() {
       delay = await cycle();
     } catch (e) {
       if (e instanceof StopSignal || ctl.stopped) throw new StopSignal();
-      log.error('Cycle error', e.message);
-      state.error = e.message;
-      delay = 15_000;
+      await halt('extension_error', e.message);
+      throw new StopSignal();
     }
     ctl.set('running');
     publish();
@@ -379,7 +604,7 @@ async function cycle() {
 
   const tab = await chrome.tabs.get(state.tabId).catch(() => null);
   if (!tab) {
-    await stop('linked tab was closed');
+    await halt('extension_error', 'the linked tab was closed');
     throw new StopSignal();
   }
   if (backend.kind === 'debugger' && !backend.attached) {
@@ -423,6 +648,7 @@ async function cycle() {
     job: settings.task.job,
     firstMessages: settings.messages.first,
     pickedMessage: run.pick,
+    lead: run.server && run.lead ? { name: run.lead.name, url: run.lead.url } : null,
     sendMode: settings.messages.sendMode,
     inbox,
     page: { url: vp.url, title: vp.title, viewport: { w: vp.w, h: vp.h } },
@@ -545,9 +771,10 @@ async function inboxDue(settings) {
 async function onInboxReport(r) {
   await chrome.storage.local.set({ inbox: { top: r.top, at: Date.now() } });
   log.info(`Inbox check: top=${r.top} unread=[${r.unread.join(', ')}] accepted=[${r.accepted.join(', ')}]`);
+  const { alerts } = run.settings.telegram;
   const lines = [];
-  if (r.unread.length) lines.push(`💬 New message${r.unread.length > 1 ? 's' : ''} from: ${r.unread.join(', ')}`);
-  if (r.accepted.length) lines.push(`🤝 Accepted your invitation: ${r.accepted.join(', ')}`);
+  if (r.unread.length && alerts.newMessage) lines.push(`💬 New message${r.unread.length > 1 ? 's' : ''} from: ${r.unread.join(', ')}`);
+  if (r.accepted.length && alerts.accepted) lines.push(`🤝 Accepted your invitation: ${r.accepted.join(', ')}`);
   if (lines.length) await run.telegram.send(lines.join('\n'));
 }
 
@@ -623,15 +850,19 @@ async function executeActions(actions, vp, shot) {
           await ctl.sleep(clamp(a.ms ?? 1000, 0, 600_000));
           break;
         case 'notify':
+          if (ALERTS[a.alert]) {
+            await halt(a.alert, a.text || state.lastSummary, a.photo ? shot.blob : null);
+            throw new StopSignal();
+          }
           await telegram.send(`💬 ${a.text || state.lastSummary}`, a.photo ? shot.blob : null);
           break;
         case 'next':
-          if (run.feed.length) run.nextPage = true;
+          if (OUTCOME_FIELD[a.outcome]) await bumpStats({ [OUTCOME_FIELD[a.outcome]]: 1 });
+          if (run.feed.length || run.server) run.nextPage = true;
           else log.warn('"next" ignored – the feed is empty');
           break;
         case 'pause':
           log.warn(`Analyzer paused the run: ${a.reason || a.text || ''}`);
-          await telegram.send(`⏸ Paused by analyzer: ${a.reason || a.text || ''}`, null, { dedupe: false });
           ctl.pause();
           break;
         case 'stop':
@@ -643,10 +874,9 @@ async function executeActions(actions, vp, shot) {
         state.stats.actions++;
       }
     } catch (e) {
-      if (e instanceof StopSignal) throw e;
-      rec.ok = false;
-      rec.error = e.message;
-      log.warn(`Action ${a.type} failed`, e.message);
+      if (e instanceof StopSignal || ctl.stopped) throw new StopSignal();
+      await halt('extension_error', `action ${a.type} failed: ${e.message}`);
+      throw new StopSignal();
     }
     report.push(rec);
     if (run.nextPage) break; // the page is done; anything after "next" is skipped
@@ -661,49 +891,6 @@ async function onPageEvent(ev) {
   run.events.push(ev);
   if (run.events.length > 20) run.events.shift();
   log.info(`🔔 ${ev.kind}: ${ev.text}`);
-  const tg = run.settings.telegram;
-  if (tg.notifyOnEvents) {
-    let photo = null;
-    if (tg.sendScreenshotOnEvent) {
-      photo = await captureTab({ id: state.tabId }, run)
-        .then((s) => s.blob)
-        .catch(() => null);
-    }
-    run?.telegram.send(`🔔 ${ev.text}`, photo);
-  }
   ctl.wake(); // look at the screen now instead of waiting out the idle delay
   publish();
-}
-
-function statusText() {
-  const up = state.startedAt ? Math.round((Date.now() - state.startedAt) / 60_000) : 0;
-  const s = state.stats;
-  const f = state.feed;
-  const feed = !f ? '' : f.index < 0 ? `\nFeed: ${f.total} pages, none opened yet` : `\nFeed: page ${f.index + 1}/${f.total} ${f.url}`;
-  return `Status: ${state.status}\nTab: ${state.tabTitle}${feed}\nUptime: ${up} min\nCycles ${s.cycles} · AI ${s.analyses}${s.cost ? ` (≈$${s.cost.toFixed(2)})` : ''} · actions ${s.actions} · events ${s.events}\nLast: ${state.lastSummary || '-'}`;
-}
-
-async function onTelegramCommand(cmd) {
-  const tg = run?.telegram;
-  if (!tg) return;
-  const reply = (t, p) => tg.send(t, p, { dedupe: false });
-  log.info(`Telegram command ${cmd}`);
-  switch (cmd) {
-    case '/pause':
-      ctl.pause();
-      return reply('⏸ Paused');
-    case '/resume':
-      ctl.resume();
-      return reply('▶️ Resumed');
-    case '/stop':
-      return stop('Telegram command');
-    case '/status':
-      return reply(statusText());
-    case '/shot': {
-      const shot = await captureTab({ id: state.tabId }, run).catch((e) => ({ error: e.message }));
-      return shot.blob ? reply(state.tabTitle, shot.blob) : reply(`Screenshot failed: ${shot.error}`);
-    }
-    default:
-      return reply('Commands: /status /pause /resume /stop /shot');
-  }
 }
