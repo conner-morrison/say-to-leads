@@ -134,8 +134,9 @@ export class RelayClient {
         backoff = Math.min(backoff * 2, 60_000);
         continue;
       }
-      // A server that answers at once with nothing new must not be asked in a tight loop.
-      if (quiet && Date.now() - t0 < 3000) await sleep(5000, signal);
+      // A server that answers at once must not be asked in a tight loop – also when the answer has
+      // messages the engine did not take (e.g. a lead that stays unacked while the run is blocked).
+      if (Date.now() - t0 < 3000) await sleep(quiet ? 5000 : 3000, signal);
     }
   }
 

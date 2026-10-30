@@ -1,6 +1,7 @@
 // Settings schema + persistence. Everything the user can tune lives here.
 
 import { DEFAULT_JOB } from './job-default.js';
+import { ENV_KEYS, loadEnv } from './env.js';
 
 export const DEFAULTS = {
   task: {
@@ -39,7 +40,7 @@ export const DEFAULTS = {
     apiKey: '',
     model: 'claude-opus-5-5',
     effort: 'low', // low | medium | high – low keeps latency/cost down for a loop
-    imageScale: 0.333, // screenshot size sent to the analyzer: 1 | 0.5 | 0.333 (≈1/9 of the image tokens)
+    imageScale: 0.5, // screenshot size sent to the analyzer: 1 | 0.5 | 0.333 – 1/3 made LinkedIn's toast, counter and names unreadable
     mirrorToBridge: true, // Claude API mode: also POST each turn to the bridge's /mirror so a run can be watched
   },
   input: {
@@ -104,15 +105,37 @@ export function deepMerge(base, over) {
   return base;
 }
 
+const getPath = (o, path) => path.split('.').reduce((v, k) => v?.[k], o);
+function setPath(o, path, v) {
+  const keys = path.split('.');
+  const last = keys.pop();
+  keys.reduce((x, k) => x[k], o)[last] = v;
+}
+
+// DEFAULTS with the values from extension/.env on top (see lib/env.js).
+export async function baseSettings() {
+  const base = structuredClone(DEFAULTS);
+  const env = await loadEnv();
+  for (const [key, path] of Object.entries(ENV_KEYS)) if (env[key]) setPath(base, path, env[key]);
+  return base;
+}
+
 export async function loadSettings() {
   const { settings } = await chrome.storage.local.get('settings');
-  const s = deepMerge(structuredClone(DEFAULTS), settings || {});
+  const base = await baseSettings();
+  const s = deepMerge(structuredClone(base), settings || {});
   if (!String(s.task.job || '').trim()) s.task.job = DEFAULT_JOB; // an emptied box means "use the default"
+  // An empty field means "use .env / the default", so a key in .env fills a box left blank in Settings.
+  for (const path of Object.values(ENV_KEYS)) if (getPath(s, path) === '') setPath(s, path, getPath(base, path));
   return s;
 }
 
 export async function saveSettings(settings) {
   // An unedited job is stored empty, so improvements to the built-in default reach existing installs.
   if (String(settings.task?.job || '').trim() === DEFAULT_JOB.trim()) settings = { ...settings, task: { ...settings.task, job: '' } };
+  // Same for values that came from .env: stored empty, so editing .env (and reloading) takes effect.
+  settings = structuredClone(settings);
+  const base = await baseSettings();
+  for (const path of Object.values(ENV_KEYS)) if (getPath(settings, path) === getPath(base, path)) setPath(settings, path, '');
   await chrome.storage.local.set({ settings });
 }

@@ -16,6 +16,8 @@ import base64
 import json
 import re
 import shutil
+import socket
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,7 +40,7 @@ def archive(rid, tag):
     for d in (INBOX, OUTBOX):
         for f in d.glob(f"{rid}.*"):
             shutil.move(str(f), str(dest / f"{d.name}-{f.name}"))
-    (dest / "status.txt").write_text(tag)
+    (dest / "status.txt").write_text(tag, encoding="utf-8")
     old = sorted(ARCHIVE.iterdir(), key=lambda p: p.stat().st_mtime)[:-KEEP_ARCHIVED]
     for p in old:
         shutil.rmtree(p, ignore_errors=True)
@@ -74,6 +76,14 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
+        # An error in here must answer, not drop the connection (the extension only sees "Failed to fetch").
+        try:
+            self.handle_post()
+        except Exception as e:
+            log(f"ERROR {self.path}: {e!r}")
+            self._send(500, {"ok": False, "error": f"bridge error: {e!r}"})
+
+    def handle_post(self):
         if not self.path.startswith(("/analyze", "/mirror")):
             return self._send(404, {"ok": False, "error": "not found"})
         try:
@@ -96,7 +106,7 @@ class Handler(BaseHTTPRequestHandler):
                 jpg.write_bytes(base64.b64decode(b64))
             req["image"] = {**img, "file": str(jpg)}
             tmp = INBOX / f"{rid}.json.tmp"
-            tmp.write_text(json.dumps(req, indent=2, ensure_ascii=False))
+            tmp.write_text(json.dumps(req, indent=2, ensure_ascii=False), encoding="utf-8")
             tmp.replace(INBOX / f"{rid}.json")  # json last: a visible .json means the pair is complete
         events = len(req.get("events") or [])
         log(f"NEW {rid} · {req.get('page', {}).get('title', '')[:60]} · events={events}")
@@ -107,7 +117,7 @@ class Handler(BaseHTTPRequestHandler):
         while time.time() < deadline:
             if out.exists():
                 try:
-                    result = json.loads(out.read_text())
+                    result = json.loads(out.read_text(encoding="utf-8"))
                 except json.JSONDecodeError:
                     time.sleep(0.3)
                     continue
@@ -133,7 +143,7 @@ class Handler(BaseHTTPRequestHandler):
             if b64:
                 jpg.write_bytes(base64.b64decode(b64))
             req["image"] = {**img, "file": str(jpg)}
-            (MIRROR / f"{rid}.json").write_text(json.dumps(req, indent=2, ensure_ascii=False))
+            (MIRROR / f"{rid}.json").write_text(json.dumps(req, indent=2, ensure_ascii=False), encoding="utf-8")
             for f in sorted(MIRROR.iterdir(), key=lambda p: p.stat().st_mtime)[:-KEEP_MIRRORED]:
                 f.unlink(missing_ok=True)
         res, use = req.get("result") or {}, req.get("usage") or {}
@@ -142,16 +152,41 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, {"ok": True})
 
 
+class Server(ThreadingHTTPServer):
+    # On Windows, SO_REUSEADDR lets a second bridge bind the same port and silently take some of the
+    # requests (an old bridge with old code answered the screenshots). Refuse to share the port there.
+    allow_reuse_address = sys.platform != "win32"
+
+
 def main():
+    # Titles and prompts hold "–", "→", emoji…: on Windows the console/log code page (cp1252) can't print
+    # them, and a failing log() inside a request handler drops the connection ("Failed to fetch").
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
     a = ap.parse_args()
     for d in (INBOX, OUTBOX, ARCHIVE, MIRROR):
         d.mkdir(parents=True, exist_ok=True)
-    srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    try:
+        srv = Server((a.host, a.port), Handler)
+    except OSError as e:
+        log(f"port {a.port} is in use ({e}) - another bridge is probably running already; stop it first")
+        sys.exit(1)
     srv.daemon_threads = True
     log(f"bridge listening on http://{a.host}:{a.port}  (data: {DATA})")
+    # "localhost" may resolve to IPv6 ::1 in Chrome: answer there too when the default host is used.
+    if a.host == "127.0.0.1":
+        try:
+            class V6Server(Server):
+                address_family = socket.AF_INET6
+            srv6 = V6Server(("::1", a.port), Handler)
+            srv6.daemon_threads = True
+            threading.Thread(target=srv6.serve_forever, daemon=True).start()
+            log(f"bridge also listening on http://[::1]:{a.port} (localhost)")
+        except OSError as e:
+            log(f"IPv6 localhost not available ({e}) - use http://127.0.0.1:{a.port} in Settings")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -1,4 +1,5 @@
-import { DEFAULTS, loadSettings, saveSettings } from '../lib/settings.js';
+import { baseSettings, loadSettings, saveSettings } from '../lib/settings.js';
+import { loadEnv } from '../lib/env.js';
 import { detectHardware, resolveProfile } from '../lib/profiles.js';
 import { DEFAULT_RELAY_URL } from '../lib/relay.js';
 
@@ -111,8 +112,8 @@ function build() {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.textContent = 'Default';
-      btn.onclick = () => {
-        fill(DEFAULTS, `${opts.reset}.`);
+      btn.onclick = async () => {
+        fill(await baseSettings(), `${opts.reset}.`);
         msg(`${title} defaults loaded – press Save to keep them`);
       };
       const h2 = card.querySelector('h2');
@@ -224,6 +225,7 @@ function collect(base) {
   return s;
 }
 
+const env = await loadEnv();
 let current;
 build();
 current = await loadSettings();
@@ -236,9 +238,9 @@ document.getElementById('save').onclick = async () => {
   await saveSettings(current);
   msg('Saved ✓ (takes effect on next Start)');
 };
-document.getElementById('reset').onclick = () => {
+document.getElementById('reset').onclick = async () => {
   if (!confirm('Reset all settings to defaults?')) return;
-  fill(DEFAULTS);
+  fill(await baseSettings()); // defaults with extension/.env on top
   msg('Defaults loaded – press Save to keep them');
 };
 document.getElementById('testBridge').onclick = async () => {
@@ -265,7 +267,7 @@ const REG_TEXT = {
 function renderRelay(r, { prefill = false } = {}) {
   if (prefill) {
     document.getElementById('regName').value = r.name || '';
-    document.getElementById('regUrl').value = r.url || DEFAULT_RELAY_URL;
+    document.getElementById('regUrl').value = r.url || env.RELAY_URL || DEFAULT_RELAY_URL;
   }
   const el = document.getElementById('regStatus');
   el.textContent = REG_TEXT[r.status] || r.status;

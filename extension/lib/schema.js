@@ -1,7 +1,7 @@
 // The contract between the extension and any analyzer (Claude Code via bridge, or the API).
 // Keep bridge/cli.py ACTION_TYPES and CLAUDE.md in sync with this file.
 
-export const ACTION_TYPES = ['click', 'double_click', 'hover', 'type', 'key', 'scroll', 'browse', 'wait', 'notify', 'next', 'pause', 'stop'];
+export const ACTION_TYPES = ['click', 'double_click', 'hover', 'type', 'key', 'scroll', 'browse', 'connect', 'add_note', 'note', 'send_invite', 'wait', 'notify', 'next', 'pause', 'stop'];
 
 // Error alarms the analyzer can raise with notify; the extension sends them and stops the run.
 export const ALERT_KINDS = ['weekly_limit', 'linkedin_error'];
@@ -9,37 +9,42 @@ export const ALERT_KINDS = ['weekly_limit', 'linkedin_error'];
 // Per-page results reported with "next", counted for the weekly summary.
 export const OUTCOMES = ['sent', 'pending', 'error'];
 
+// The Claude API compiles this schema into a grammar, and every optional field roughly doubles it:
+// one action object with all fields optional was rejected as "Schema is too complex". So each action
+// type is its own small variant with every field required. The API schema is stricter than the
+// contract: x/y, selector, browse "sec" and a "type" without a target are bridge-only (sanitizeResult
+// and cli.py still accept them).
+const BOX = { type: 'array', items: { type: 'number' }, description: '[x1,y1,x2,y2] normalized 0..1 – the whole target' };
+const action = (types, props = {}) => ({
+  type: 'object',
+  additionalProperties: false,
+  required: ['type', ...Object.keys(props)],
+  properties: { type: { type: 'string', enum: types }, ...props },
+});
+const ACTION_VARIANTS = [
+  action(['click', 'double_click', 'hover'], { box: BOX }),
+  action(['type'], { box: BOX, text: { type: 'string' }, clear: { type: 'boolean', description: 'clear the field first' } }),
+  action(['key'], { key: { type: 'string', description: 'e.g. Enter, Escape, Tab, Ctrl+A' } }),
+  action(['scroll'], { dy: { type: 'number', description: 'pixels, positive = down' } }),
+  action(['wait'], { ms: { type: 'number' } }),
+  action(['browse', 'connect', 'add_note', 'send_invite']),
+  action(['note'], { text: { type: 'string', description: 'the whole note, with \\n for line breaks' } }),
+  action(['notify'], {
+    text: { type: 'string' },
+    photo: { type: 'boolean', description: 'attach the screenshot' },
+    alert: { enum: [...ALERT_KINDS, null], description: 'an error alarm – the run stops after it; null = a plain note' },
+  }),
+  action(['next'], { outcome: { type: 'string', enum: OUTCOMES, description: 'what happened on the page that is done' } }),
+  action(['pause', 'stop'], { reason: { type: 'string' } }),
+];
+
 export const RESULT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['summary', 'actions', 'next_check_sec'],
   properties: {
     summary: { type: 'string', description: 'One or two sentences: what is on screen and what you decided.' },
-    actions: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['type'],
-        properties: {
-          type: { type: 'string', enum: ACTION_TYPES },
-          x: { type: 'number', description: '0..1 from the left edge of the screenshot' },
-          y: { type: 'number', description: '0..1 from the top edge of the screenshot' },
-          box: { type: 'array', items: { type: 'number' }, description: '[x1,y1,x2,y2] normalized 0..1 – preferred for click targets' },
-          selector: { type: 'string', description: 'CSS selector, if known; overrides x/y/box' },
-          text: { type: 'string' },
-          key: { type: 'string', description: 'e.g. Enter, Escape, Tab, Ctrl+A' },
-          dy: { type: 'number', description: 'scroll pixels, positive = down' },
-          ms: { type: 'number' },
-          sec: { type: 'number', description: 'browse: how long to read the page (default 25-70 random)' },
-          photo: { type: 'boolean', description: 'notify: attach the screenshot' },
-          outcome: { type: 'string', enum: OUTCOMES, description: 'next: what happened on the page that is done' },
-          alert: { type: 'string', enum: ALERT_KINDS, description: 'notify: this is an error alarm – the run stops after it' },
-          clear: { type: 'boolean', description: 'type: clear the field first' },
-          reason: { type: 'string' },
-        },
-      },
-    },
+    actions: { type: 'array', items: { anyOf: ACTION_VARIANTS } },
     next_check_sec: { anyOf: [{ type: 'number' }, { type: 'null' }] },
     inbox: {
       type: 'object',
@@ -63,11 +68,15 @@ events (new notifications / unread counters) and a short history of your previou
 Reply with JSON only, matching the schema:
 - summary: what you see and what you decided.
 - actions: a short list (0-5) executed in order with human-like timing. Coordinates are normalized
-  to the screenshot: x,y in 0..1 from the top-left. Prefer "box" (the whole button/field) over a point.
-  click/double_click/hover need a target. "type" types text (optionally targets a field first; set
+  to the screenshot: 0..1 from the top-left. Targets are a "box" [x1,y1,x2,y2] around the whole button/field.
+  click/double_click/hover need a box. "type" clicks its box (the field), then types text (set
   clear=true to replace existing text). "key" presses a key or combo (Enter, Escape, Ctrl+A).
   "scroll" uses dy pixels. "browse" reads the whole page like a person (random scrolls to any depth,
-  pauses, then back to the top) without screenshots – optional sec. "wait" waits ms. "notify" messages the human on Telegram (photo=true to
+  pauses, then back to the top) without screenshots. "connect" (LinkedIn profiles) finds the profile header's
+  Connect button itself – directly or in the More (…) menu – and clicks it; RESULT OF YOUR LAST ACTIONS says
+  what it did or why it found none. In LinkedIn's invitation modal, "add_note" clicks Add a note (never
+  "Send without a note"), "note" types text into the note box and reports the character count, and
+  "send_invite" clicks the modal's Send. "wait" waits ms. "notify" messages the human on Telegram (photo=true to
   attach the screenshot; alert="weekly_limit" or "linkedin_error" marks an error alarm, and the run
   stops right after it, so do any cleanup such as Escape before it). "next" means the job on this page is done (outcome = what happened there, when the job
   asks for it): the next feed URL is opened (after

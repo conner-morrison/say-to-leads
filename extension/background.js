@@ -2,6 +2,7 @@
 // run control, schedule/breaks, Telegram, and messaging with popup/options/content.
 
 import { loadSettings } from './lib/settings.js';
+import { CdpDom } from './lib/cdpdom.js';
 import { resolveProfile, detectHardware } from './lib/profiles.js';
 import { RunControl, StopSignal } from './lib/control.js';
 import { log, getLogs, clearLogs, setVerbose } from './lib/logger.js';
@@ -10,10 +11,10 @@ import { analyze, bridgeHealth, buildUserText, estimateCost, mirrorTurn } from '
 import { Telegram } from './lib/telegram.js';
 import { RelayClient, EMPTY as RELAY_EMPTY, leadsIn } from './lib/relay.js';
 import { CdpBackend, DomBackend, HumanInput } from './lib/input.js';
-import { humanBetween, pointInBox, jitterPoint, chance, rnd, clamp } from './lib/human.js';
+import { humanBetween, pointInBox, jitterPoint, chance, rnd, clamp, readingDelayMs } from './lib/human.js';
 
 const state = {
-  status: 'idle', // idle | running | paused | break | waiting_ai
+  status: 'idle', // idle | running | paused | break | waiting_ai | watching
   tabId: null,
   tabTitle: '',
   startedAt: null,
@@ -25,14 +26,22 @@ const state = {
   nextBreakAt: null,
   aiWaitingSince: null,
   error: null,
-  blocked: false, // set by an error alarm: no automatic start until a human presses Start
+  // The session is what the buttons switch: Start → on, Pause → paused, Resume → on, Stop (or an error
+  // alarm) → off. Nothing works while it is off – no run, no watching the server, no automatic start.
+  // On = a run, or (server mode, nothing left to do) watching the server for new leads.
+  session: 'off', // off | on | paused
+  inRun: false, // a run (not just watching) is going – restored after a worker restart to report it lost
   relay: { ...RELAY_EMPTY }, // registration with the relay server (see lib/relay.js)
   source: 'server', // where URLs come from: 'server' (relay queue) | 'urls' (Settings list)
   queued: 0, // URLs from the server waiting in the queue
 };
 
+// Status shown while no run is going: what the session is doing.
+const idleStatus = () =>
+  state.session === 'paused' ? 'paused' : state.session === 'on' && state.source === 'server' ? 'watching' : 'idle';
+
 const ctl = new RunControl((status) => {
-  state.status = status;
+  state.status = status === 'idle' ? idleStatus() : status;
   if (status !== 'waiting_ai') state.aiWaitingSince = null;
   publish();
 });
@@ -45,6 +54,13 @@ function publish() {
   chrome.runtime.sendMessage({ type: 'state', state }).catch(() => {});
 }
 
+function setSession(s) {
+  state.session = s;
+  if (!run) state.status = idleStatus();
+  syncWatch();
+  publish();
+}
+
 const sendToTab = (tabId, m) => chrome.tabs.sendMessage(tabId, { stl: true, ...m }, { frameId: 0 });
 
 // Restore the linked tab after a service-worker restart.
@@ -53,8 +69,9 @@ const sendToTab = (tabId, m) => chrome.tabs.sendMessage(tabId, { stl: true, ...m
   if (saved) {
     state.tabId = saved.tabId;
     state.tabTitle = saved.tabTitle;
-    state.blocked = !!saved.blocked;
-    if (saved.status && saved.status !== 'idle') await halt('extension_error', 'the extension worker restarted, the run was lost');
+    state.session = saved.session || 'off'; // watching survives a worker restart; a run does not
+    state.status = idleStatus();
+    if (saved.inRun) await halt('extension_error', 'the extension worker restarted, the run was lost');
   }
   publish();
   await applySource();
@@ -102,8 +119,9 @@ chrome.storage.onChanged.addListener((ch, area) => area === 'local' && ch.settin
 // "Watching": idle in server mode, holding a question open for the server's "new leads" trigger.
 // While a run works through its queue, triggers are ignored (not even asked for); the run fetches
 // the next leads itself when the queue is empty.
+// Watching runs only while the session is on (Start pressed, not paused or stopped) and no run is going.
 function syncWatch() {
-  relay.setConsume(state.source === 'server' && !run);
+  relay.setConsume(state.source === 'server' && !run && state.session === 'on');
 }
 
 // ---------- lead queue (server mode) ----------
@@ -177,7 +195,7 @@ async function onServerTrigger() {
 }
 
 async function maybeAutoStart() {
-  if (ctl.active || run || state.blocked || state.source !== 'server' || !state.relay.workerId) return;
+  if (ctl.active || run || state.session !== 'on' || state.source !== 'server' || !state.relay.workerId) return;
   const q = await readQueue();
   state.queued = q.length;
   if (!q.length) return;
@@ -223,8 +241,12 @@ async function handle(msg, sender) {
       publish();
       return {};
     case 'start':
-      state.blocked = false; // a human checked and starts again
-      await start();
+      state.error = null; // a human checked and starts again
+      setSession('on');
+      await start().catch((e) => {
+        setSession('off');
+        throw e;
+      });
       return {};
     case 'relayRegister':
       await relay.register(msg.url, msg.name);
@@ -233,15 +255,29 @@ async function handle(msg, sender) {
       await relay.forget();
       return {};
     case 'stop':
+      if (!run && state.session !== 'off') log.info('Stopped watching the server');
+      setSession('off');
       await stop('stopped by user');
       return {};
     case 'pause':
-      ctl.pause();
-      log.info('Paused');
+      if (run) ctl.pause();
+      else if (state.session === 'on') setSession('paused'); // stop watching, keep the session
+      log.info(run ? 'Paused' : 'Paused watching the server');
       return {};
     case 'resume':
-      ctl.resume();
-      log.info('Resumed');
+      // Settings changed while paused (analyzer mode, model, job, messages…) apply from here on.
+      // The input driver and the hardware profile stay as they were at Start.
+      if (run) {
+        const prev = run.settings.analyzer.mode;
+        run.settings = await loadSettings();
+        if (run.settings.analyzer.mode !== prev) log.info(`Analyzer mode: ${prev} → ${run.settings.analyzer.mode}`);
+        ctl.resume();
+        log.info('Resumed');
+      } else if (state.session === 'paused') {
+        setSession('on');
+        log.info('Resumed watching the server');
+        onServerTrigger().catch((e) => log.warn(`Lead fetch failed: ${e.message}`)); // look now, not at the next trigger
+      }
       return {};
     case 'clearLogs':
       clearLogs();
@@ -281,6 +317,12 @@ async function start() {
   if (!tab) throw new Error('Linked tab no longer exists – link a tab again.');
 
   const settings = await loadSettings();
+  if (settings.analyzer.mode === 'bridge') {
+    const url = settings.analyzer.bridgeUrl;
+    await bridgeHealth(url).catch(() => {
+      throw new Error(`Debug mode: the bridge is not reachable at ${url}. Start it with "python bridge/bridge.py" and check Settings → Analyzer → Bridge URL (Test bridge).`);
+    });
+  }
   const server = settings.task.source === 'server';
   if (server && !state.relay.workerId) {
     throw new Error({
@@ -296,8 +338,7 @@ async function start() {
   if (server && !queue.length && (await fetchLeads())) queue = await readQueue();
   if (server && !queue.length) {
     log.info('No leads on the server – watching for new ones');
-    syncWatch();
-    return publish();
+    return setSession('on');
   }
   const feed = server ? [] : parseFeed(settings.task.feed);
   if (/^(chrome|edge|about|chrome-extension|devtools):/.test(tab.url || '')) throw new Error('Browser internal pages cannot be automated.');
@@ -337,6 +378,7 @@ async function start() {
     stats: { cycles: 0, analyses: 0, actions: 0, events: 0, cost: 0 },
     feed: server ? { index: -1, total: queue.length, url: queue[0].url } : feed.length ? { index: -1, total: feed.length, url: feed[0] } : null,
   });
+  state.inRun = true;
   syncWatch(); // a run ignores the server's triggers
   scheduleBreak();
   ctl.start();
@@ -370,7 +412,7 @@ async function halt(kind, text, photo = null) {
   const [key, label] = ALERTS[kind];
   (kind === 'extension_error' ? log.error : log.warn)(`${label}: ${text}`);
   state.error = `${label}: ${text} – check, then press Start.`;
-  state.blocked = true;
+  state.session = 'off'; // no watching, no automatic start until a human presses Start
   const settings = run?.settings ?? (await loadSettings());
   if (settings.telegram.alerts[key]) {
     const tg = run?.telegram ?? new Telegram(settings.telegram);
@@ -378,7 +420,7 @@ async function halt(kind, text, photo = null) {
     if (kind === 'weekly_limit') await sendWeeklySummary(tg);
   }
   await stop(label);
-  publish();
+  setSession('off'); // also when no run was going (e.g. lost in a worker restart)
 }
 
 // ---------- weekly summary ----------
@@ -419,13 +461,14 @@ async function cleanup() {
   keepAlive = null;
   const r = run;
   run = null;
+  state.inRun = false;
+  if (r && !r.server) state.session = 'off'; // a URL list is done; only server mode goes on watching
   if (ctl.active) ctl.stop();
   if (r) {
     r.telegram.stopPolling();
     await r.backend.dispose();
   }
-  publish();
-  syncWatch(); // idle again: watch for the server's trigger
+  setSession(state.session); // back to watching (session on) or idle
 }
 
 function onDebuggerDetached(reason) {
@@ -809,7 +852,105 @@ async function targetPoint(a, vp) {
   return pointInBox([Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2)]);
 }
 
-const COUNTED = new Set(['click', 'double_click', 'type', 'key', 'scroll']);
+// "connect" on a LinkedIn profile: the page finds the header's Connect (or More → Connect) in the DOM,
+// and the human mouse clicks it. Never throws for a missing button – the model gets the reason
+// (with the button labels that were there) and decides; only a broken page connection throws.
+async function connectOnProfile(vp) {
+  const { input } = run;
+  const ask = (step) => sendToTab(state.tabId, { cmd: 'liConnect', step });
+  const seen = (r) => (r.seen?.length ? ` (buttons seen: ${r.seen.join(' | ')})` : '');
+  const clickBox = (box) => input.click(pointInBox(box));
+
+  let r = await ask('row');
+  if (!r?.ok) throw new Error(r?.error || 'the page did not answer');
+  // The header may be scrolled away (e.g. after reading the page): wheel back to it like a person.
+  for (let i = 0; i < 3 && r.box && !r.inView; i++) {
+    await input.move({ x: rnd(vp.w * 0.22, vp.w * 0.45), y: rnd(vp.h * 0.35, vp.h * 0.7) });
+    await input.scroll(r.box[1] < 0 ? r.box[1] - vp.h * 0.3 : r.box[3] - vp.h * 0.6);
+    await ctl.sleep(humanBetween(500, 1200));
+    r = await ask('row');
+  }
+  if (r.box && !r.inView) return { ok: false, error: 'the profile header button stays out of view' };
+  if (r.state === 'pending') return { ok: true, note: 'the header shows Pending – already invited, nothing clicked' };
+  if (r.state === 'connect') {
+    await clickBox(r.box);
+    return { ok: true, note: 'clicked Connect in the profile header' };
+  }
+  if (r.state !== 'more') return { ok: false, error: `no Connect, More or … button in the profile header${seen(r)}` };
+
+  await clickBox(r.box);
+  let m = { state: 'closed' };
+  for (let i = 0; i < 6 && m.state === 'closed'; i++) {
+    await ctl.sleep(humanBetween(450, 900)); // the menu animates open
+    m = await ask('menu');
+  }
+  if (m.state === 'pending') {
+    await input.press('Escape');
+    return { ok: true, note: 'the More menu shows Pending – already invited, nothing clicked' };
+  }
+  if (m.state !== 'connect' || !m.inView) {
+    if (m.state !== 'closed') await input.press('Escape');
+    const why = m.state === 'closed' ? 'the More menu did not open' : m.state === 'connect' ? 'Connect in the More menu is off screen' : 'the More menu has no Connect';
+    return { ok: false, error: `${why} (opened the ${r.how} button)${seen(m)} – menu closed` };
+  }
+  await ctl.sleep(readingDelayMs(m.seen?.join(' ') || '')); // read the menu items
+  await clickBox(m.box);
+  return { ok: true, note: `clicked Connect in the More/… menu (${r.how} button)` };
+}
+
+// The invitation modal, found in the DOM like "connect": "add_note" clicks Add a note (never "Send
+// without a note"), "note" types into the note box and reports the counter, "send_invite" clicks the
+// modal's Send once it is enabled. A missing button comes back as the reason, not as a crash.
+async function inviteStep(a) {
+  const { input } = run;
+  // The debugger sees iframes and closed shadow roots, where the content script found no modal; the
+  // content script stays the fallback (DOM driver, or a CDP error) and a second opinion.
+  const cdp = run.backend.kind === 'debugger' ? new CdpDom(run.backend) : null;
+  const ask = async (step) => {
+    let c = null;
+    if (cdp) {
+      c = await cdp.invite(step).catch((e) => ({ ok: true, state: 'no_dialog', seen: [`cdp: ${e.message}`] }));
+      if (c.state !== 'no_dialog') return c;
+    }
+    const d = await sendToTab(state.tabId, { cmd: 'liInvite', step });
+    if (d?.ok && d.state === 'no_dialog' && c) d.seen = [...(c.seen || []), ...(d.seen || [])];
+    return d;
+  };
+  const seen = (r) => (r.seen?.length ? ` (buttons seen: ${r.seen.join(' | ')})` : '');
+  const r = await ask(a.type === 'add_note' ? 'add_note' : a.type === 'note' ? 'field' : 'send');
+  if (!r?.ok) throw new Error(r?.error || 'the page did not answer');
+  if (r.state === 'no_dialog') return { ok: false, error: `no invitation modal found in the page${seen(r)}` };
+  if (r.state === 'none') {
+    const what = { add_note: 'no "Add a note" button in the modal', note: 'no note box in the modal', send_invite: 'no Send button in the modal' }[a.type];
+    return { ok: false, error: `${what}${seen(r)}` };
+  }
+  if (!r.inView) return { ok: false, error: 'the modal button is off screen' };
+  if (a.type === 'add_note') {
+    await input.click(pointInBox(r.box));
+    return { ok: true, note: 'clicked Add a note' };
+  }
+  if (a.type === 'send_invite') {
+    if (r.state === 'disabled') return { ok: false, error: `Send is still disabled (counter ${r.counter || '?'}) – type the note first` };
+    await input.click(pointInBox(r.box));
+    return { ok: true, note: `clicked Send (counter was ${r.counter || '?'})` };
+  }
+  // note
+  const text = String(a.text || '');
+  await input.click(pointInBox(r.box));
+  await ctl.sleep(humanBetween(200, 700));
+  if (r.length) await input.clearField(); // something is in the box already (e.g. a retry)
+  await input.type(text);
+  await ctl.sleep(humanBetween(300, 800));
+  const after = await ask('field');
+  const typed = after?.length ?? -1;
+  const match = typed === text.length ? 'matches the text' : `the text has ${text.length}`;
+  return { ok: true, note: `typed the note – the box holds ${typed} characters (${match}), counter ${after?.counter || '?'}` };
+}
+
+// Buttons a box click must never hit (a mis-guessed box sends without a note / opens a Sales Navigator list).
+const FORBIDDEN_CLICK = /send without a note|save in sales navigator/i;
+
+const COUNTED = new Set(['click', 'double_click', 'type', 'key', 'scroll', 'connect', 'add_note', 'note', 'send_invite']);
 
 async function executeActions(actions, vp, shot) {
   const { input, settings, telegram } = run;
@@ -825,8 +966,21 @@ async function executeActions(actions, vp, shot) {
         case 'double_click':
         case 'hover': {
           const pt = await targetPoint(a, vp);
-          if (a.type === 'hover') await input.move(pt);
-          else await input.click(pt, { double: a.type === 'double_click' });
+          if (a.type === 'hover') {
+            await input.move(pt);
+            break;
+          }
+          // Look under the point first (debugger: through iframes/shadow roots): a guessed box must never
+          // land on a button the job forbids, and the label tells the model what it really clicked.
+          const hit = run.backend.kind === 'debugger' ? await new CdpDom(run.backend).labelAt(pt.x, pt.y).catch(() => null) : null;
+          if (hit && FORBIDDEN_CLICK.test(hit)) {
+            Object.assign(rec, { ok: false, error: `refused – the box is on "${hit}", which the job never clicks; nothing clicked` });
+            log.warn(`click refused on "${hit}"`);
+            rec.abort = true; // the rest of this turn was planned on top of that click
+            break;
+          }
+          await input.click(pt, { double: a.type === 'double_click' });
+          if (hit != null) rec.note = hit ? `clicked "${hit}"` : 'clicked page content (no button there)';
           break;
         }
         case 'type':
@@ -846,6 +1000,20 @@ async function executeActions(actions, vp, shot) {
         case 'browse':
           await browsePage(a.sec);
           break;
+        case 'connect': {
+          const r = await connectOnProfile(vp);
+          Object.assign(rec, r);
+          (r.ok ? log.info : log.warn)(`connect: ${r.ok ? r.note : r.error}`);
+          break;
+        }
+        case 'add_note':
+        case 'note':
+        case 'send_invite': {
+          const r = await inviteStep(a);
+          Object.assign(rec, r);
+          (r.ok ? log.info : log.warn)(`${a.type}: ${r.ok ? r.note : r.error}`);
+          break;
+        }
         case 'wait':
           await ctl.sleep(clamp(a.ms ?? 1000, 0, 600_000));
           break;
@@ -857,7 +1025,8 @@ async function executeActions(actions, vp, shot) {
           await telegram.send(`💬 ${a.text || state.lastSummary}`, a.photo ? shot.blob : null);
           break;
         case 'next':
-          if (OUTCOME_FIELD[a.outcome]) await bumpStats({ [OUTCOME_FIELD[a.outcome]]: 1 });
+          // The API schema makes "outcome" required, so the "next" that only opens page 1 carries one too.
+          if (OUTCOME_FIELD[a.outcome] && run.feedIndex >= 0) await bumpStats({ [OUTCOME_FIELD[a.outcome]]: 1 });
           if (run.feed.length || run.server) run.nextPage = true;
           else log.warn('"next" ignored – the feed is empty');
           break;
@@ -879,6 +1048,7 @@ async function executeActions(actions, vp, shot) {
       throw new StopSignal();
     }
     report.push(rec);
+    if (rec.abort) break;
     if (run.nextPage) break; // the page is done; anything after "next" is skipped
   }
   return report;

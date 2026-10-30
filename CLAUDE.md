@@ -46,8 +46,11 @@ Server mode (leads = URL + name, parsed by `leadsIn` in relay.js):
   moves right after the last fetched). Nothing on the server → no run, status "watching".
 - A queue head leaves the queue only when its page is done (`next`), so an error halt keeps it for the next
   Start. Queue empty → fetch again → none → run ends → watching.
-- Watching = a long poll (`limit=1&wait=25`) used only as a trigger; any message/notice → fetch → auto-start.
-  A running run ignores triggers (the watch loop is off). Error alarms set `state.blocked`: no auto-start.
+- Nothing works until **Start**: the session (`state.session`: off → on → paused) is switched only by the
+  popup buttons. Start → on (run the queue, else watch); Pause/Resume also pause/resume watching; Stop or an
+  error alarm → off = idle (no watching, no auto-start). Popup status: idle · watching · running · paused ….
+- Watching (session on, no run) = a long poll (`limit=1&wait=25`) used only as a trigger; any message/notice →
+  fetch → auto-start. A running run ignores triggers (the watch loop is off).
 - The lead's name goes to the AI as `LEAD FOR THIS PAGE`, so it is not read from the page.
 
 ## Inbox monitor
@@ -91,7 +94,10 @@ Follow the current one in the debug loop and add layout lessons learned from scr
   (whole target) – the extension picks a human-like point inside it. `x`/`y` and `selector` also work.
 - Types: click, double_click, hover, type (optional target, `clear`), key (`Enter`, `Escape`,
   `Ctrl+A`…), scroll (`dy` px), browse (reads the whole page by itself – random depths, pauses,
-  back to top – with no screenshots; optional `sec`), wait (`ms`), notify (Telegram, `photo`; `alert: "weekly_limit" | "linkedin_error"` marks an
+  back to top – with no screenshots; optional `sec`), connect (LinkedIn profile: the extension finds
+  the header's Connect, or More → Connect, in the DOM and clicks it; the result note comes back in the next
+  prompt), add_note / note (`text`) / send_invite (LinkedIn invitation modal, found in the DOM: Add a note –
+  never "Send without a note" –, type into the note box with a character-count report, click Send), wait (`ms`), notify (Telegram, `photo`; `alert: "weekly_limit" | "linkedin_error"` marks an
   error alarm – the extension sends it if enabled and stops the run), next (page done → next feed
   URL; later actions are skipped; `outcome: sent | pending | error` counts toward the weekly summary that
   goes to Telegram when the weekly limit stops the run, then resets), pause, stop.
@@ -100,6 +106,11 @@ Follow the current one in the debug loop and add layout lessons learned from scr
 - Empty `actions` is a valid answer ("nothing to do").
 
 ## Layout
+
+- `extension/lib/cdpdom.js` – the invitation modal through the debugger (pierced tree: iframes, closed shadow
+  roots) for add_note/note/send_invite, and `labelAt` – box clicks report the label hit and refuse forbidden buttons.
+- `extension/.env` (gitignored; template `extension/.env.example`, read by `lib/env.js`) – per-PC API key,
+  model, mode, bridge URL, Telegram token/chat, relay URL. They fill Settings fields left empty; saved values win.
 
 - `extension/background.js` – engine: loop, change detection, schedule/breaks, Telegram commands.
 - `extension/lib/` – `human.js` (timing, mouse paths, typing/typos), `input.js` (CDP vs DOM backends +

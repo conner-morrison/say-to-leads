@@ -18,7 +18,7 @@ INBOX, OUTBOX, MIRROR = DATA / "inbox", DATA / "outbox", DATA / "mirror"
 
 # Keep in sync with extension/lib/schema.js
 ALERT_KINDS = ["weekly_limit", "linkedin_error"]
-ACTION_TYPES = {"click", "double_click", "hover", "type", "key", "scroll", "browse", "wait", "notify", "next", "pause", "stop"}
+ACTION_TYPES = {"click", "double_click", "hover", "type", "key", "scroll", "browse", "connect", "add_note", "note", "send_invite", "wait", "notify", "next", "pause", "stop"}
 
 
 def pending():
@@ -37,7 +37,7 @@ def resolve(rid):
 
 
 def show(rid):
-    req = json.loads((INBOX / f"{rid}.json").read_text())
+    req = json.loads((INBOX / f"{rid}.json").read_text(encoding="utf-8"))
     img = req.get("image", {})
     vp = req.get("page", {}).get("viewport", {})
     print(f"REQUEST {rid}")
@@ -53,7 +53,7 @@ def mirror(n):
     if not turns:
         print("nothing mirrored yet (Claude API mode with 'Mirror turns to the bridge' on)")
     for p in turns:
-        t = json.loads(p.read_text())
+        t = json.loads(p.read_text(encoding="utf-8"))
         res, use = t.get("result") or {}, t.get("usage") or {}
         when = time.strftime("%H:%M:%S", time.localtime((t.get("created") or 0) / 1000))
         print(f"=== {p.stem} {when} · {t.get('model', '')} · {t.get('page', {}).get('title', '')[:50]}")
@@ -84,7 +84,7 @@ def validate(obj):
             "selector" in a or "box" in a or ("x" in a and "y" in a)
         ):
             raise ValueError(f"action {i}: {a['type']} needs box, x/y or selector")
-        if "alert" in a and (a["type"] != "notify" or a["alert"] not in ALERT_KINDS):
+        if a.get("alert") is not None and (a["type"] != "notify" or a["alert"] not in ALERT_KINDS):
             raise ValueError(f"action {i}: alert goes on notify and must be one of {ALERT_KINDS}")
         if "outcome" in a and (a["type"] != "next" or a["outcome"] not in ("sent", "pending", "error")):
             raise ValueError(f"action {i}: outcome goes on next and must be sent, pending or error")
@@ -100,6 +100,9 @@ def validate(obj):
 
 
 def main():
+    # Prompts and answers hold "–", "→", emoji…: the Windows console code page can't print them.
+    for stream in (sys.stdout, sys.stderr, sys.stdin):
+        stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     w = sub.add_parser("wait")
@@ -136,13 +139,13 @@ def main():
         rid = resolve(a.id)
         if not (INBOX / f"{rid}.json").exists():
             sys.exit(f"{rid} is not pending (answered, superseded or timed out)")
-        raw = sys.stdin.read() if a.answer == "-" else Path(a.answer[1:]).read_text() if a.answer.startswith("@") else a.answer
+        raw = sys.stdin.read() if a.answer == "-" else Path(a.answer[1:]).read_text(encoding="utf-8") if a.answer.startswith("@") else a.answer
         try:
             obj = validate(json.loads(raw))
         except (ValueError, json.JSONDecodeError) as e:
             sys.exit(f"invalid answer: {e}")
         tmp = OUTBOX / f"{rid}.json.tmp"
-        tmp.write_text(json.dumps(obj, ensure_ascii=False))
+        tmp.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
         tmp.replace(OUTBOX / f"{rid}.json")
         print(f"delivered {rid}: {len(obj['actions'])} actions")
 

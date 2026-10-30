@@ -13,7 +13,7 @@ export function buildUserText(req) {
     ? req.history.map((h) => `- ${new Date(h.t).toLocaleTimeString()} ${h.summary} → ${h.actions.join(', ') || 'no actions'}`).join('\n')
     : '(none)';
   const last = req.lastActions.length
-    ? req.lastActions.map((a) => `- ${a.type}: ${a.ok ? 'ok' : 'FAILED ' + a.error}`).join('\n')
+    ? req.lastActions.map((a) => `- ${a.type}: ${a.ok ? `ok${a.note ? ' – ' + a.note : ''}` : 'FAILED ' + a.error}`).join('\n')
     : '(none)';
   const f = req.feed;
   const feed = !f
@@ -61,11 +61,15 @@ export async function analyze(req, settings, signal) {
 
 async function viaBridge(req, a, signal) {
   const timeout = AbortSignal.timeout((a.bridgeTimeoutSec + 15) * 1000);
-  const res = await fetch(`${a.bridgeUrl.replace(/\/$/, '')}/analyze`, {
+  const url = a.bridgeUrl.replace(/\/$/, '');
+  const res = await fetch(`${url}/analyze`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ ...req, system: `${SYSTEM_PROMPT}\n\n${jobText(req)}`, prompt: buildUserText(req), timeoutSec: a.bridgeTimeoutSec }),
     signal: AbortSignal.any([signal, timeout]),
+  }).catch((e) => {
+    if (signal.aborted || timeout.aborted) throw e;
+    throw new Error(`bridge not reachable at ${url} (${e.message}) – is bridge/bridge.py running? Check Settings → Analyzer → Bridge URL.`);
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok || !body.ok) throw new Error(`bridge: ${body.error || res.status}`);

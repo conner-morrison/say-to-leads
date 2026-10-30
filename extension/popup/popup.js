@@ -2,22 +2,15 @@ const $ = (id) => document.getElementById(id);
 const send = (msg) => chrome.runtime.sendMessage(msg);
 let state = null;
 
-const RELAY_PILL = {
-  none: ['not registered', 'idle'],
-  rejected: ['declined', 'stopped'],
-  pending: ['approval…', 'break'],
-  registered: ['watching', 'waiting'],
-  ready: ['watching', 'waiting'],
-};
+// Registration state, shown in the meta line when it keeps the extension from working.
+const RELAY_NOTE = { none: 'not registered', rejected: 'registration declined', pending: 'waiting for approval', registered: 'no channel yet' };
 
 function render() {
   if (!state) return;
   const s = state.status;
-  // While idle, the pill says where the server registration stands: "watching" = waiting for the server's trigger.
-  const idle = s === 'idle' && state.source === 'server' && RELAY_PILL[state.relay?.status];
-  const [text, cls] = idle ? (state.relay.status === 'ready' && state.blocked ? ['stopped', 'stopped'] : idle) : [s === 'waiting_ai' ? 'waiting AI' : s, s];
-  $('status').textContent = text;
-  $('status').className = `pill ${cls}`;
+  // idle = not started (or stopped); watching = started, waiting for the server's leads.
+  $('status').textContent = s === 'waiting_ai' ? 'waiting AI' : s;
+  $('status').className = `pill ${s}`;
   $('status').title = state.relay?.name ? `${state.relay.name} · ${state.relay.status}` : '';
   $('name').textContent = state.relay?.name || '';
   $('tabTitle').textContent = state.tabTitle || (state.tabId ? `tab #${state.tabId}` : '— none —');
@@ -30,6 +23,7 @@ function render() {
   $('link').textContent = state.tabId ? 'Drop linked tab' : 'Link this tab';
   for (const k of ['cycles', 'analyses', 'actions', 'events']) $(k).textContent = state.stats[k];
   const bits = [];
+  if (state.source === 'server' && RELAY_NOTE[state.relay?.status]) bits.push(RELAY_NOTE[state.relay.status]);
   if (state.feed && active) bits.push(`page ${state.feed.index + 1}/${state.feed.total}`);
   if (state.queued) bits.push(`${state.queued} lead${state.queued > 1 ? 's' : ''} in queue`);
   if (state.profile) bits.push(`profile ${state.profile}`);

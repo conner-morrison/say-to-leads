@@ -15,20 +15,37 @@ Do this on each page, then answer `next`.
    Every `next` carries an `outcome` for the weekly summary: `sent`, `pending`, or `error`.
 2. If that row shows **Pending** → the invitation was already sent: do nothing, `next` (`outcome: pending`).
    Not a working profile (page not found, unavailable, wrong URL) → `next` (`outcome: error`).
-3. If that row shows **Connect** → click it.
-   Otherwise click **More** (or "…") and look for **Connect** in the dropdown → click it.
-   No Connect there either → close the dropdown (Escape) and `next` (`outcome: error`).
+3. Answer `{"type": "connect"}` – don't click Connect/More by box. The extension finds the header's
+   **Connect** in the DOM (directly, or More/"…" → Connect in the dropdown) and clicks it with the human
+   mouse; coordinates guessed from screenshots broke on other PCs (screen size, Windows scaling, zoom).
+   The next prompt's last-action result says "clicked Connect…", "…Pending…" (→ `next`, `outcome: pending`)
+   or "FAILED …" with the button labels it saw (menu already closed → `next`, `outcome: error`).
 4. A modal "Add a note to your invitation?" appears:
-   - It has an **Add a note** button → click it.
-   - No **Add a note** button (Premium gone) → close the modal (Escape / ✕, never "Send without
+   - Answer `{"type": "add_note"}`: the extension clicks **Add a note** from the DOM. It sits right next to
+     the blue **Send without a note**; a guessed box (small screenshots) can hit that one, so never use a box here.
+   - Result "no "Add a note" button" (Premium gone) → close the modal (Escape / ✕, never "Send without
      a note"), then `notify` "premium is gone" with `"alert": "linkedin_error"` (stops the run).
+   - Modal asks for the member's **email** ("To verify this member knows you, please enter their email to
+     connect", Send without a note greyed out): we don't have it → Escape, `next` with `outcome: error`, no alert.
+     (Roddy Richards, 2026-10-30: the model raised a linkedin_error alert, which stopped the session.)
+   - The More menu has no Connect at all (only Follow, e.g. Owen Robertson) → `next` with `outcome: error`.
+   - Fallback (steps 4–6): add_note / note / send_invite FAILED with "no invitation modal found" while the
+     modal is on screen → do that step by box (Add a note = white button LEFT of the blue "Send without a
+     note"; note = `type` into the text area with `clear: true`; Send = blue button bottom-right). The debug
+     run (Nathan, Evan) sent this way.
+     Every box click reports the label under it (`clicked "Add a note"`); clicks on Send without a note or
+     Save in Sales Navigator are refused by the extension. Sonnet 5.5 guessed Add a note at y 0.62 (the header)
+     on a 512 px shot where Opus 5.5 got [0.468,0.338,0.538,0.368] – boxes are the fallback, not the plan.
 5. In the note box, type ONE of the saved first messages, chosen at random, like a human.
    Every message starts with "Hi": put the person's first name (from the profile header) after it:
-   `Hi <FirstName>,\n\n<rest of the message>`.
+   `Hi <FirstName>,\n\n<rest of the message>`. Answer `{"type": "note", "text": "..."}` – the extension
+   finds the note box, types, and reports the box's character count (retry once if it does not match).
 6. Then follow SEND MODE from the prompt:
    - `review`: don't click Send – `notify` (with photo) and `pause`. After the human sends and resumes,
      confirm the row shows Pending, then `next`.
-   - `auto`: click **Send**, confirm the row shows Pending, then `next`.
+   - `auto`: `{"type": "send_invite"}` (clicks the modal's **Send**), confirm the row shows Pending, then `next`.
+   Learned 2026-10-30 (Nathan Smith, debug run): connect → add_note → type → Send → toast
+   "Invitation sent to Nathan." + row Pending. Screenshots were 512 px wide: too small for boxes this close.
 7. After an invitation is sent, check the bottom-left of the screen for LinkedIn's toast:
    - "Invitation sent…" or similar success → `next` with `outcome: sent` (Pending in the row confirms it too).
    - An error about the **weekly invitation limit** (toast or modal, e.g. "You've reached the
@@ -65,6 +82,9 @@ Positions are normalized [x1, y1, x2, y2].
   Connect ≈ [0.182,0.637,0.236,0.668] · Message · More.
 - The row's y position depends on how many lines the headline wraps to: Rene Pascua (3-line headline)
   had Connect at ≈ [0.184,0.733,0.234,0.76]. Always read it off the screenshot.
+- With Sales Navigator (seen 2026-10-30, Holden Ottolini, 3rd degree) the row is **Message** (blue) ·
+  **Save in Sales Navigator** (outlined, opens a list picker – never the "…") · round **"…"** icon button
+  with Connect in its menu. `connect` takes the row's right end as the "…" here.
 - After scrolling past the header, a sticky bar at the top shows More · Message · Connect
   (≈ y 0.08–0.12, right side of the main column). Scroll back to the top anyway before connecting.
 - **Add a note** moves up when the modal text is shorter: ≈ [0.472,0.3,0.528,0.327] on Rene Pascua.
@@ -79,6 +99,17 @@ Positions are normalized [x1, y1, x2, y2].
   ≈ [0.355,0.225,0.648,0.32] with placeholder "Ex: We know each other from…", counter
   `0/300` (max 300 characters), buttons **Cancel** ≈ [0.563,0.402,0.598,0.432] and **Send**
   (grey until text is typed) ≈ [0.607,0.402,0.65,0.432].
+- The invitation modal is not in the top document seen by the content script (API run 2026-10-30, Jay Chappell: add_note said "no invitation
+  modal" while it was on screen) – most likely inside LinkedIn's shadow-DOM outlet (#interop-outlet). Since then
+  add_note / note / send_invite search the modal through the debugger (lib/cdpdom.js: DOM.getDocument pierce –
+  iframes + open/closed shadow roots), then the content script; a failure lists dialogs/iframes/shadow roots seen.
+- 2nd degree with Sales Navigator (Owen Robertson, 2026-10-30): **Connect** (blue) · **Save in Sales Navigator** ·
+  **…**, and the … menu has NO Connect (Send profile · Save to PDF · Message · Follow · Report · Block · About).
+  `connect` used to cut the row at Save in Sales Navigator's left edge, missed Connect and failed via the menu;
+  the row now takes everything on the anchor's line to both sides. If `connect` still fails while the header
+  shows Connect, click it by box once (the result names the button hit).
+- After a reload, an invited profile's header row shows Message · Save in Sales Navigator · … (no Pending):
+  Pending is inside the … menu. `connect` checks the menu for Pending first (Evan Tedesco, 2026-10-30).
 - Cancel in the note box goes back to the first modal; **Escape** closes the modal without
   sending (safest way out).
 - Docked Messaging panel covers the right edge (x ≈ 0.81–1.0); don't click inside it.
