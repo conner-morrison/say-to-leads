@@ -1,5 +1,6 @@
 import { baseSettings, loadSettings, saveSettings } from '../lib/settings.js';
 import { loadEnv } from '../lib/env.js';
+import { checkKey, keyStatus } from '../lib/apikey.js';
 import { detectHardware, resolveProfile } from '../lib/profiles.js';
 import { DEFAULT_RELAY_URL } from '../lib/relay.js';
 
@@ -33,7 +34,7 @@ const SECTIONS = [
     ['analyzer.mode', 'Mode', 'select', { options: [['bridge', 'Bridge – debug via Claude Code'], ['anthropic', 'Claude API (API key)'], ['none', 'None – watch & notify only']] }],
     ['analyzer.bridgeUrl', 'Bridge URL', 'text'],
     ['analyzer.bridgeTimeoutSec', 'Bridge answer timeout (sec)', 'number'],
-    ['analyzer.apiKey', 'Anthropic API key', 'password', { help: 'Stored locally in this browser profile only.' }],
+    ['analyzer.apiKey', 'Claude API key', 'apikey'],
     ['analyzer.model', 'Model', 'select', {
       options: [
         ['claude-opus-5-5', 'Claude Opus 5.5 – recommended ($4 / $20 per 1M tokens)'],
@@ -122,6 +123,10 @@ function build() {
     }
     const grid = card.querySelector('.grid');
     for (const [path, label, type, extra = {}] of fields) {
+      if (type === 'apikey') {
+        grid.append(keyField(label));
+        continue;
+      }
       const f = document.createElement('div');
       f.className = `field${extra.wide ? ' wide' : ''}${type === 'check' ? ' check' : ''}`;
       let input;
@@ -167,6 +172,93 @@ function build() {
     }
     form.append(card);
   }
+}
+
+// ---------- Claude API key ----------
+// Not a data-path field: the key is saved on its own (Save key checks it first) and is never shown back,
+// so the main Save cannot write an old key over a newer one.
+
+function keyField(label) {
+  const f = document.createElement('div');
+  f.className = 'field wide';
+  f.innerHTML = `<label for="apiKey"></label>
+    <div class="key-row">
+      <input id="apiKey" type="password" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" />
+      <button id="saveKey" type="button" class="primary">Save key</button>
+      <button id="removeKey" type="button" class="danger">Remove</button>
+    </div>
+    <div id="keyStatus" class="key-status" role="status">Checking the saved key…</div>
+    <div id="keyMsg" class="help" aria-live="polite"></div>
+    <div class="help">Stored locally in this browser profile only. Save key checks it with Anthropic (no tokens used) and saves it right away.</div>`;
+  f.querySelector('label').textContent = label;
+  return f;
+}
+
+const savedKey = async () => String((await loadSettings()).analyzer.apiKey || '').trim();
+const formMode = () => form.querySelector('[data-path="analyzer.mode"]').value;
+
+async function renderKey() {
+  const st = await keyStatus(await savedKey(), formMode(), env, 'above');
+  const el = document.getElementById('keyStatus');
+  el.textContent = st.text;
+  el.className = `key-status ${st.cls}`;
+  // Remove only clears a key saved here; a key from .env stays (it is the fallback).
+  const { settings: stored } = await chrome.storage.local.get('settings');
+  document.getElementById('removeKey').disabled = !stored?.analyzer?.apiKey;
+}
+
+function keyMsg(text, cls = '') {
+  const el = document.getElementById('keyMsg');
+  el.textContent = text;
+  el.className = `help ${cls}`;
+}
+
+async function storeKey(key) {
+  const s = await loadSettings();
+  s.analyzer.apiKey = key;
+  await saveSettings(s);
+  current.analyzer.apiKey = (await loadSettings()).analyzer.apiKey;
+}
+
+function wireKey() {
+  const input = document.getElementById('apiKey');
+  const btn = document.getElementById('saveKey');
+  btn.onclick = async () => {
+    const key = input.value.trim();
+    if (!key) return keyMsg('Paste the key first.', 'bad');
+    if (!/^sk-ant-/.test(key)) return keyMsg('That does not look like a Claude API key (it starts with sk-ant-).', 'bad');
+    btn.disabled = true;
+    try {
+      keyMsg('Checking the key…');
+      const c = await checkKey(key);
+      if (!c.ok) {
+        await renderKey();
+        return keyMsg(`Not saved: ${c.error}.`, 'bad');
+      }
+      await storeKey(key);
+      input.value = '';
+      await renderKey();
+      keyMsg(`Saved – ${c.note}. A running run uses it after Pause → Resume or the next Start.`, 'good');
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      btn.click();
+    }
+  };
+  document.getElementById('removeKey').onclick = async () => {
+    if (!confirm('Remove the saved Claude API key?')) return;
+    await storeKey('');
+    await renderKey();
+    keyMsg(env.ANTHROPIC_API_KEY ? 'Removed – the key from extension/.env is used now.' : 'Removed.');
+  };
+  form.querySelector('[data-path="analyzer.mode"]').addEventListener('change', renderKey);
+  chrome.storage.onChanged.addListener((ch) => {
+    if (ch.settings || ch.apiKeyCheck) renderKey();
+  });
 }
 
 // One numbered textarea + Remove button inside a "list" field.
@@ -230,11 +322,20 @@ let current;
 build();
 current = await loadSettings();
 fill(current);
+wireKey();
+renderKey();
 const hw = detectHardware();
 document.getElementById('hw').textContent = `Detected: ${hw.cores} threads, ~${hw.memoryGb} GB RAM → auto profile "${resolveProfile('auto').name}". Changes apply on next Start.`;
 
+// The key is saved only by Save key; keep whatever is stored now.
+const collectAll = async () => {
+  const s = collect(current);
+  s.analyzer.apiKey = (await loadSettings()).analyzer.apiKey;
+  return s;
+};
+
 document.getElementById('save').onclick = async () => {
-  current = collect(current);
+  current = await collectAll();
   await saveSettings(current);
   msg('Saved ✓ (takes effect on next Start)');
 };
@@ -249,7 +350,7 @@ document.getElementById('testBridge').onclick = async () => {
   msg(r.ok ? `Bridge OK · pending: ${r.health.pending?.length ?? 0}` : `Bridge error: ${r.error}`);
 };
 document.getElementById('testTelegram').onclick = async () => {
-  await saveSettings(collect(current));
+  await saveSettings(await collectAll());
   const r = await chrome.runtime.sendMessage({ type: 'testTelegram' });
   msg(r.ok ? 'Telegram message sent ✓' : `Telegram error: ${r.error}`);
 };

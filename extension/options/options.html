@@ -21,6 +21,14 @@
       .reg-status.rejected, .reg-status.err { color: var(--danger); }
       #regDetail { margin-top: 6px; white-space: pre-line; }
       .field .help { font-size: 11px; color: var(--muted); margin-top: 2px; }
+      .key-row { display: flex; gap: 8px; align-items: center; }
+      .key-row input { flex: 1; min-width: 0; }
+      .key-status { font-weight: 600; margin-top: 6px; padding: 6px 10px; border: 1px solid currentColor; border-radius: 6px; }
+      .key-status:empty { display: none; }
+      .key-status.good, .help.good { color: var(--ok); }
+      .key-status.warn { color: var(--warn); }
+      .key-status.bad, .help.bad { color: var(--danger); }
+      .key-status.muted { color: var(--muted); }
       .field.check label { display: flex; gap: 6px; align-items: center; font-weight: 500; }
       .field.check input { width: auto; }
       .bar { position: sticky; bottom: 0; background: var(--bg); padding: 10px 0; display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--line); }

@@ -111,6 +111,10 @@ Follow the current one in the debug loop and add layout lessons learned from scr
   roots) for add_note/note/send_invite, and `labelAt` – box clicks report the label hit and refuse forbidden buttons.
 - `extension/.env` (gitignored; template `extension/.env.example`, read by `lib/env.js`) – per-PC API key,
   model, mode, bridge URL, Telegram token/chat, relay URL. They fill Settings fields left empty; saved values win.
+- The Claude API key is entered only in Settings → Analyzer (Save key / Remove, saved on its own after a free
+  key check `GET /v1/models`; the main Save never writes it). `lib/apikey.js` holds the check and the status line
+  shown under the key box; the key is never shown back, only …last4 and where it comes from (saved / .env).
+  The mode is set only in Settings → Analyzer too; the popup has no AI card.
 
 - `extension/background.js` – engine: loop, change detection, schedule/breaks, Telegram commands.
 - `extension/lib/` – `human.js` (timing, mouse paths, typing/typos), `input.js` (CDP vs DOM backends +

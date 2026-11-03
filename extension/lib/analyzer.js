@@ -77,7 +77,7 @@ async function viaBridge(req, a, signal) {
 }
 
 async function viaAnthropic(req, a, signal) {
-  if (!a.apiKey) throw new Error('No API key set (Settings → Analyzer)');
+  if (!a.apiKey) throw new Error('No Claude API key – enter it in Settings → Analyzer and press Save key');
   // Server-side refusal fallback: a declined request is retried on a suitable model. Haiku has none.
   const fallback = !a.model.startsWith('claude-haiku');
   const res = await fetch('https://api.anthropic.com/v1/messages', {

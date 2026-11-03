@@ -323,6 +323,9 @@ async function start() {
       throw new Error(`Debug mode: the bridge is not reachable at ${url}. Start it with "python bridge/bridge.py" and check Settings → Analyzer → Bridge URL (Test bridge).`);
     });
   }
+  if (settings.analyzer.mode === 'anthropic' && !String(settings.analyzer.apiKey || '').trim()) {
+    throw new Error('Claude API mode needs an API key: enter it in Settings → Analyzer and press Save key (or switch the AI to Debug).');
+  }
   const server = settings.task.source === 'server';
   if (server && !state.relay.workerId) {
     throw new Error({

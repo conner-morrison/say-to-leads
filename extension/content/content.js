@@ -10,10 +10,25 @@
 
   // ---------- event watching ----------
 
-  const emit = (kind, text) =>
-    chrome.runtime
-      .sendMessage({ type: 'page-event', event: { kind, text: String(text).slice(0, 300), t: Date.now(), url: location.href } })
-      .catch(() => {});
+  // After an extension reload this copy is cut off: sendMessage then throws "Extension context invalidated"
+  // synchronously (not a rejected promise), so .catch alone missed it. The dead copy stops itself.
+  const alive = () => {
+    try {
+      return !!chrome.runtime?.id;
+    } catch {
+      return false;
+    }
+  };
+  const emit = (kind, text) => {
+    if (!alive()) return teardown();
+    try {
+      chrome.runtime
+        .sendMessage({ type: 'page-event', event: { kind, text: String(text).slice(0, 300), t: Date.now(), url: location.href } })
+        .catch(() => {});
+    } catch {
+      teardown();
+    }
+  };
 
   const titleCount = (t) => {
     const m = String(t).match(/\((\d+)\+?\)/);
@@ -23,6 +38,7 @@
   const selCounts = new Map();
 
   function watchTick() {
+    if (!alive()) return teardown();
     if (cfg.titleBadge) {
       const n = titleCount(document.title);
       if (n > lastTitle) emit('title', document.title);
@@ -483,11 +499,14 @@
   };
   chrome.runtime.onMessage.addListener(onMessage);
 
-  window.__stlTeardown = () => {
+  // This copy's own teardown (window.__stlTeardown may already be a newer copy's, so a dead copy never calls it).
+  function teardown() {
     clearInterval(watchTimer);
     dot?.remove();
     try {
       chrome.runtime.onMessage.removeListener(onMessage);
     } catch {} // the extension was reloaded: this copy's runtime is gone
-  };
+    if (window.__stlTeardown === teardown) delete window.__stlTeardown;
+  }
+  window.__stlTeardown = teardown;
 })();
