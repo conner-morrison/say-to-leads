@@ -9,9 +9,13 @@ development. Later the analyzer is switched to the Claude API (`analyzer.mode = 
 1. Bridge must be running: `python3 bridge/bridge.py` (user usually starts it in a terminal;
    otherwise start it with `run_in_background`).
 2. Wait for a request: `python3 bridge/cli.py wait --timeout 600`
-   It prints the request id, the screenshot path, and the full prompt (feed position, page, events, history).
+   It prints the request id, the screenshot path, the system prompt (rules + the Job from Settings, in full
+   whenever it changed, else one "unchanged" line; `cli.py job` prints it) and the per-turn text.
+   This is exactly what the Claude API gets in API mode; debug mode differs only in who answers.
 3. Look at the screenshot with the Read tool (`bridge/data/inbox/<id>.jpg`).
-4. Decide per the job the user gave in chat (it is not in the prompt), then answer:
+4. Decide like the API would: from the SYSTEM text (the Settings Job wins over `jobs/*.md` and chat memory),
+   the per-turn text and the screenshot. Saved Settings reach a running run at its next cycle, so a changed
+   SYSTEM block or SEND MODE / messages apply from that request on. Then answer:
    `python3 bridge/cli.py respond <id> '<json>'` (or `respond latest -` with JSON on stdin).
 5. Repeat. Only the newest request is live; older ones are auto-archived as superseded.
    The extension waits up to `analyzer.bridgeTimeoutSec` (default 900s) per request.
@@ -53,6 +57,19 @@ Server mode (leads = URL + name, parsed by `leadsIn` in relay.js):
   fetch → auto-start. A running run ignores triggers (the watch loop is off).
 - The lead's name goes to the AI as `LEAD FOR THIS PAGE`, so it is not read from the page.
 
+## Day schedule
+
+`lib/schedule.js` + the schedule section of `background.js`; Settings → Schedule (`settings.schedule`).
+- On the first wake-up of a day (worker load or the 1-min `schedule` alarm) today's schedule is made: 5–6 h
+  in 2–5 random intervals from now (not before `dayStart`), stored as `schedule {day, intervals, skipped, source}`.
+  A schedule a human set while the day was over (`nextSchedule`) is used instead.
+- Work only inside intervals: the loop waits as a break between them, watching/auto-start are off. At each
+  interval start the extension starts / resumes by itself (latest Settings), unless `schedHold` is set:
+  `stop` (Stop pressed – cleared by Start or the next day), `error` (error alarm), `done` (URL list finished).
+- Reschedule (Schedule button = random, or edited times → Save schedule; message `reschedule`): day over →
+  tomorrow's schedule; running in an interval → ask to pause first; now inside a new interval → ask start now,
+  else that interval is skipped and work starts at the next one.
+
 ## Inbox monitor
 
 Every `monitor.inboxEveryMin` minutes (Settings → Inbox monitor, default 60, 0 = off) the next request
@@ -72,8 +89,9 @@ Never answer them; the API already did.
 
 ## Jobs
 
-The job the user gives in chat is written down in `jobs/*.md` (e.g. `jobs/linkedin-connect.md`).
-Follow the current one in the debug loop and add layout lessons learned from screenshots to it.
+The job the user gives in chat is written down in `jobs/*.md` (e.g. `jobs/linkedin-connect.md`) and, in
+model-facing form, in `lib/job-default.js` (the Settings default). In the debug loop the Job in the request
+(Settings) is what to follow; add layout lessons learned from screenshots to both files.
 
 ## Answer format (must match `extension/lib/schema.js`)
 

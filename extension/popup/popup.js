@@ -30,6 +30,8 @@ function render() {
   if (state.driver) bits.push(`driver ${state.driver}`);
   if (state.analyzer) bits.push(`AI ${state.analyzer}`);
   if (state.stats.cost) bits.push(`≈$${state.stats.cost.toFixed(2)} spent`);
+  const sc = state.sched;
+  if (sc?.on) bits.push(sc.slot >= 0 ? `working till ${sc.until}` : sc.next ? `next interval ${sc.next}` : 'done for today');
   if (state.nextBreakAt && active) bits.push(`break ~${new Date(state.nextBreakAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
   $('meta').textContent = bits.join(' · ');
   $('summary').textContent = state.lastSummary || '';

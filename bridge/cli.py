@@ -4,10 +4,16 @@
     python3 bridge/cli.py wait [--timeout SEC]   block until a request is pending, then show it
     python3 bridge/cli.py list                   list pending request ids
     python3 bridge/cli.py show [ID]              show a request (default: newest pending)
+    python3 bridge/cli.py job                    the system prompt + Job of the newest request (= Settings now)
+
+wait/show print the request exactly as the Claude API gets it: the system prompt (rules + the Job from
+Settings) and the per-turn text. The system part is printed in full only when it changed since the last
+one shown (it is the same every turn, like the API's cached block); --system prints it anyway.
     python3 bridge/cli.py respond ID JSON        answer it (JSON string, @file, or - for stdin; ID may be 'latest')
     python3 bridge/cli.py mirror [N]             last N turns of a Claude API run (mirrored, read-only)
 """
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -36,12 +42,25 @@ def resolve(rid):
     return rid
 
 
-def show(rid):
+LAST_SYSTEM = DATA / "last_system.txt"  # sha + id of the system prompt shown last
+
+
+def show(rid, force_system=False):
     req = json.loads((INBOX / f"{rid}.json").read_text(encoding="utf-8"))
     img = req.get("image", {})
     vp = req.get("page", {}).get("viewport", {})
     print(f"REQUEST {rid}")
     print(f"IMAGE   {img.get('file')}  ({img.get('width')}x{img.get('height')}, viewport {vp.get('w')}x{vp.get('h')})")
+    system = req.get("system", "")
+    sha = hashlib.sha1(system.encode("utf-8")).hexdigest()[:12]
+    seen = LAST_SYSTEM.read_text(encoding="utf-8").split() if LAST_SYSTEM.exists() else []
+    print("-" * 70)
+    if force_system or not seen or seen[0] != sha:
+        print(f"SYSTEM {sha} ({'changed – Settings were edited' if seen else 'first request'}; follow it from now on)")
+        print(system)
+        LAST_SYSTEM.write_text(f"{sha} {rid}", encoding="utf-8")
+    else:
+        print(f"SYSTEM {sha} unchanged since {seen[1]} (rules + Job from Settings; cli.py job prints it)")
     print("-" * 70)
     print(req.get("prompt", ""))
     print("-" * 70)
@@ -107,9 +126,12 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     w = sub.add_parser("wait")
     w.add_argument("--timeout", type=float, default=600)
+    w.add_argument("--system", action="store_true")
     sub.add_parser("list")
     s = sub.add_parser("show")
     s.add_argument("id", nargs="?")
+    s.add_argument("--system", action="store_true")
+    sub.add_parser("job")
     r = sub.add_parser("respond")
     r.add_argument("id")
     r.add_argument("answer")
@@ -123,7 +145,7 @@ def main():
         end = time.time() + a.timeout
         while time.time() < end:
             if pending():
-                return show(resolve("latest"))
+                return show(resolve("latest"), a.system)
             time.sleep(0.5)
         print("no request within timeout")
         sys.exit(2)
@@ -134,7 +156,13 @@ def main():
             print(p.stem)
         return
     if a.cmd == "show":
-        return show(resolve(a.id))
+        return show(resolve(a.id), a.system)
+    if a.cmd == "job":
+        reqs = sorted([*INBOX.glob("*.json"), *(DATA / "archive").glob("*/inbox-*.json")], key=lambda p: p.stat().st_mtime)
+        if not reqs:
+            sys.exit("no request yet")
+        print(json.loads(reqs[-1].read_text(encoding="utf-8")).get("system", "(none)"))
+        return
     if a.cmd == "respond":
         rid = resolve(a.id)
         if not (INBOX / f"{rid}.json").exists():

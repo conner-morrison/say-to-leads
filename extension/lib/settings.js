@@ -61,13 +61,26 @@ export const DEFAULTS = {
     idleMoveChance: 0.15, // wander the mouse a bit while idle
     idleScrollChance: 0.05,
     maxActionsPerHour: 150,
-    workStart: '00:00', // local time window when work is allowed
+    workStart: '00:00', // local time window when work is allowed (used only while the day schedule is off)
     workEnd: '23:59',
     breaksEnabled: true,
     breakEveryMinMin: 35,
     breakEveryMaxMin: 75,
     breakLenMinMin: 3,
     breakLenMaxMin: 12,
+  },
+  schedule: {
+    // Day schedule (lib/schedule.js): made when the extension wakes up on a new day or by the Schedule
+    // button; the extension works only inside its intervals and starts by itself at each one.
+    enabled: true,
+    hoursMin: 5, // total work per day, picked at random
+    hoursMax: 6,
+    partsMin: 2, // number of intervals, picked at random
+    partsMax: 5,
+    gapMinMin: 20, // pause between intervals (shrinks when the day is too short)
+    gapMaxMin: 90,
+    dayStart: '08:00', // no interval starts earlier (waking up later starts from then)
+    dayEnd: '22:00', // the intervals aim to end by then; a late wake-up still gets its full hours
   },
   telegram: {
     enabled: false,

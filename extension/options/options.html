@@ -37,6 +37,13 @@
       .list:empty { display: none; }
       .list-item { display: flex; gap: 8px; align-items: flex-start; }
       .list-num { min-width: 1.5em; padding-top: 6px; color: var(--muted); text-align: right; }
+      .sched-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+      .sched-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .sched-row input { width: auto; }
+      .sched-row .list-num { padding-top: 0; }
+      .sched-len { min-width: 9em; margin: 0; }
+      dialog { border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: inherit; max-width: 420px; }
+      dialog::backdrop { background: rgb(0 0 0 / 0.4); }
     </style>
   </head>
   <body>

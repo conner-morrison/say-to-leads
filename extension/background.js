@@ -12,6 +12,7 @@ import { Telegram } from './lib/telegram.js';
 import { RelayClient, EMPTY as RELAY_EMPTY, leadsIn } from './lib/relay.js';
 import { CdpBackend, DomBackend, HumanInput } from './lib/input.js';
 import { humanBetween, pointInBox, jitterPoint, chance, rnd, clamp, readingDelayMs } from './lib/human.js';
+import { dayKey, tomorrowKey, generate, clean, slotAt, intervalAt, nextSlot, dayOver, nowMin } from './lib/schedule.js';
 
 const state = {
   status: 'idle', // idle | running | paused | break | waiting_ai | watching
@@ -34,11 +35,14 @@ const state = {
   relay: { ...RELAY_EMPTY }, // registration with the relay server (see lib/relay.js)
   source: 'server', // where URLs come from: 'server' (relay queue) | 'urls' (Settings list)
   queued: 0, // URLs from the server waiting in the queue
+  sched: null, // day schedule summary for the popup: { on, slot, until, next, over, hold }
 };
 
 // Status shown while no run is going: what the session is doing.
 const idleStatus = () =>
-  state.session === 'paused' ? 'paused' : state.session === 'on' && state.source === 'server' ? 'watching' : 'idle';
+  state.session === 'paused' ? 'paused'
+  : state.session === 'on' && !workAllowed() ? 'break'
+  : state.session === 'on' && state.source === 'server' ? 'watching' : 'idle';
 
 const ctl = new RunControl((status) => {
   state.status = status === 'idle' ? idleStatus() : status;
@@ -76,6 +80,7 @@ const sendToTab = (tabId, m) => chrome.tabs.sendMessage(tabId, { stl: true, ...m
   publish();
   await applySource();
   await relay.load();
+  await schedTick(); // waking up: today's schedule is made now if there is none yet
   maybeAutoStart();
 })();
 
@@ -121,7 +126,7 @@ chrome.storage.onChanged.addListener((ch, area) => area === 'local' && ch.settin
 // the next leads itself when the queue is empty.
 // Watching runs only while the session is on (Start pressed, not paused or stopped) and no run is going.
 function syncWatch() {
-  relay.setConsume(state.source === 'server' && !run && state.session === 'on');
+  relay.setConsume(state.source === 'server' && !run && state.session === 'on' && workAllowed());
 }
 
 // ---------- lead queue (server mode) ----------
@@ -195,7 +200,7 @@ async function onServerTrigger() {
 }
 
 async function maybeAutoStart() {
-  if (ctl.active || run || state.session !== 'on' || state.source !== 'server' || !state.relay.workerId) return;
+  if (ctl.active || run || state.session !== 'on' || state.source !== 'server' || !state.relay.workerId || !workAllowed()) return;
   const q = await readQueue();
   state.queued = q.length;
   if (!q.length) return;
@@ -242,6 +247,7 @@ async function handle(msg, sender) {
       return {};
     case 'start':
       state.error = null; // a human checked and starts again
+      await setHold(null);
       setSession('on');
       await start().catch((e) => {
         setSession('off');
@@ -256,6 +262,7 @@ async function handle(msg, sender) {
       return {};
     case 'stop':
       if (!run && state.session !== 'off') log.info('Stopped watching the server');
+      await setHold('stop'); // the schedule starts nothing until Start (or the next day)
       setSession('off');
       await stop('stopped by user');
       return {};
@@ -267,18 +274,15 @@ async function handle(msg, sender) {
     case 'resume':
       // Settings changed while paused (analyzer mode, model, job, messages…) apply from here on.
       // The input driver and the hardware profile stay as they were at Start.
-      if (run) {
-        const prev = run.settings.analyzer.mode;
-        run.settings = await loadSettings();
-        if (run.settings.analyzer.mode !== prev) log.info(`Analyzer mode: ${prev} → ${run.settings.analyzer.mode}`);
-        ctl.resume();
-        log.info('Resumed');
-      } else if (state.session === 'paused') {
-        setSession('on');
-        log.info('Resumed watching the server');
-        onServerTrigger().catch((e) => log.warn(`Lead fetch failed: ${e.message}`)); // look now, not at the next trigger
-      }
+      await resumeAll('Resumed');
       return {};
+    case 'schedule':
+      await schedTick();
+      return { schedule: await schedInfo() };
+    case 'scheduleGenerate':
+      return scheduleGenerate();
+    case 'reschedule':
+      return reschedule(msg.intervals, msg.answer || {});
     case 'clearLogs':
       clearLogs();
       return {};
@@ -416,6 +420,7 @@ async function halt(kind, text, photo = null) {
   (kind === 'extension_error' ? log.error : log.warn)(`${label}: ${text}`);
   state.error = `${label}: ${text} – check, then press Start.`;
   state.session = 'off'; // no watching, no automatic start until a human presses Start
+  await setHold('error'); // the schedule does not start it either
   const settings = run?.settings ?? (await loadSettings());
   if (settings.telegram.alerts[key]) {
     const tg = run?.telegram ?? new Telegram(settings.telegram);
@@ -465,7 +470,10 @@ async function cleanup() {
   const r = run;
   run = null;
   state.inRun = false;
-  if (r && !r.server) state.session = 'off'; // a URL list is done; only server mode goes on watching
+  if (r && !r.server) {
+    state.session = 'off'; // a URL list is done; only server mode goes on watching
+    if (!hold) await setHold('done'); // and the schedule does not start the list over
+  }
   if (ctl.active) ctl.stop();
   if (r) {
     r.telegram.stopPolling();
@@ -550,6 +558,190 @@ async function openFeedPage(i) {
 
 // ---------- schedule ----------
 
+// Day schedule (lib/schedule.js). Made when the extension wakes up on a new day; the extension works only
+// inside its intervals: at each interval start it starts (or resumes) by itself, between intervals a run
+// waits as a break and watching the server stops. A human can reschedule in Settings → Schedule.
+// hold = why the schedule must not start anything: 'stop' (Stop pressed – until Start or the next day),
+// 'error' (an error alarm – until Start), 'done' (a URL list finished – until Start).
+
+let schedCfg = null; // settings.schedule
+let sched = null; // today's schedule
+let lastSlot = -1; // interval we were in at the last tick
+let hold = null;
+
+const fmtIv = (iv) => `${iv.start}–${iv.end}`;
+
+async function setHold(h) {
+  hold = h;
+  await chrome.storage.local.set({ schedHold: h });
+  publishSched();
+}
+
+// Today's schedule; on the first wake-up of a day it is made (or taken from what a human set for that day).
+async function ensureToday() {
+  schedCfg = (await loadSettings()).schedule;
+  const got = await chrome.storage.local.get(['schedule', 'nextSchedule', 'schedHold']);
+  hold = got.schedHold ?? null;
+  const today = dayKey();
+  if (got.schedule?.day === today) return (sched = got.schedule);
+  if (!schedCfg.enabled) return (sched = null);
+  const next = got.nextSchedule;
+  sched = next?.day === today
+    ? { day: today, intervals: next.intervals, skipped: [], source: 'manual', at: Date.now() }
+    : { day: today, intervals: generate(schedCfg, nowMin()), skipped: [], source: 'auto', at: Date.now() };
+  await chrome.storage.local.set({ schedule: sched });
+  if (next && next.day <= today) await chrome.storage.local.remove('nextSchedule');
+  if (hold === 'stop') await setHold(null); // a Stop holds for the day it was pressed
+  lastSlot = -1;
+  log.info(`Today's schedule (${sched.source === 'manual' ? 'set by you' : 'random'}): ${sched.intervals.map(fmtIv).join(', ')}`);
+  return sched;
+}
+
+function publishSched() {
+  const on = !!schedCfg?.enabled;
+  const slot = on ? slotAt(sched) : -1;
+  state.sched = on
+    ? { on, slot, until: slot >= 0 ? sched.intervals[slot].end : null, next: nextSlot(sched)?.start || null, over: dayOver(sched), hold }
+    : { on: false };
+  if (!run) state.status = idleStatus();
+  publish();
+}
+
+let tickOp = Promise.resolve();
+function schedTick() {
+  tickOp = tickOp.then(tickNow).catch((e) => log.warn(`Schedule: ${e.message}`));
+  return tickOp;
+}
+
+async function tickNow() {
+  await ensureToday();
+  const slot = schedCfg.enabled ? slotAt(sched) : -1;
+  publishSched();
+  syncWatch();
+  if (!schedCfg.enabled || slot === lastSlot) return;
+  const left = lastSlot;
+  lastSlot = slot;
+  if (slot < 0) {
+    if (left >= 0) log.info(`Interval ${fmtIv(sched.intervals[left])} is over${nextSlot(sched) ? ` – next at ${nextSlot(sched).start}` : ' – done for today'}`);
+    return;
+  }
+  const iv = sched.intervals[slot];
+  if (hold) return log.info(`Interval ${fmtIv(iv)} – not starting (${{ stop: 'stopped by you', error: 'stopped by an error alarm', done: 'the URL list is done' }[hold]}; press Start)`);
+  log.info(`Interval ${fmtIv(iv)} begins`);
+  if (run) return ctl.paused ? resumeAll('Resumed for the interval') : undefined;
+  if (state.session === 'paused') return resumeAll('Resumed for the interval');
+  setSession('on');
+  await start().catch((e) => {
+    log.warn(`Scheduled start failed: ${e.message}`);
+    state.error = e.message;
+    setSession('off');
+  });
+}
+
+chrome.alarms.create('schedule', { periodInMinutes: 1 });
+chrome.alarms.onAlarm.addListener((a) => a.name === 'schedule' && schedTick());
+chrome.storage.onChanged.addListener((ch, area) => {
+  if (area !== 'local' || !ch.settings) return;
+  settingsChanged = true; // a run picks them up at its next cycle
+  schedTick();
+});
+
+// Saved Settings reach a running run at its next cycle (and on Resume / a new interval), in every
+// analyzer mode: job, messages, send mode, analyzer mode and model, human timing, Telegram, watchers…
+// Only the input driver and the hardware profile stay as they were at Start (they need a new Start).
+let settingsChanged = false;
+async function reloadRunSettings() {
+  settingsChanged = false;
+  const old = run.settings;
+  const s = await loadSettings();
+  if (JSON.stringify(s) === JSON.stringify(old)) return;
+  run.settings = s;
+  run.input.human = s.human;
+  run.input.showCursor = s.input.showCursor;
+  setVerbose(s.debug.verbose);
+  if (JSON.stringify(s.telegram) !== JSON.stringify(old.telegram)) {
+    run.telegram.stopPolling();
+    run.telegram = new Telegram(s.telegram);
+  }
+  const changed = Object.keys(s).filter((k) => JSON.stringify(s[k]) !== JSON.stringify(old[k]));
+  log.info(`Settings applied to the run: ${changed.join(', ')}`);
+  if (s.analyzer.mode !== old.analyzer.mode) log.info(`Analyzer mode: ${old.analyzer.mode} → ${s.analyzer.mode}`);
+  if (s.input.driver !== old.input.driver || s.performance.profile !== old.performance.profile) {
+    log.warn('Input driver / performance profile changes need Stop → Start');
+  }
+  if (run.pick != null && run.pick >= s.messages.first.length) run.pick = pickMessage(s); // the picked message was removed
+  if (!s.human.breaksEnabled) state.nextBreakAt = null;
+  else if (!old.human.breaksEnabled) scheduleBreak();
+}
+
+async function resumeAll(what) {
+  if (run) {
+    await reloadRunSettings();
+    ctl.resume();
+    log.info(what);
+  } else if (state.session === 'paused') {
+    setSession('on');
+    log.info(`${what} – watching the server`);
+    onServerTrigger().catch((e) => log.warn(`Lead fetch failed: ${e.message}`)); // look now, not at the next trigger
+  }
+}
+
+async function schedInfo() {
+  const { nextSchedule } = await chrome.storage.local.get('nextSchedule');
+  return {
+    enabled: !!schedCfg?.enabled,
+    today: sched,
+    next: nextSchedule?.day === tomorrowKey() ? nextSchedule : null,
+    over: !!sched && dayOver(sched),
+    slot: slotAt(sched),
+    running: !!run && !ctl.paused && slotAt(sched) >= 0,
+    hold,
+  };
+}
+
+// Random intervals for the day a reschedule goes to: today from now, or tomorrow when today's work is over.
+async function scheduleGenerate() {
+  await ensureToday();
+  const over = !!sched && dayOver(sched);
+  return { intervals: generate(schedCfg, over ? 0 : nowMin()), day: over ? 'tomorrow' : 'today' };
+}
+
+// A human's new schedule. Asks back (answer.pause / answer.start) before changing anything:
+// - today's work is over ("sleeping") → it becomes tomorrow's schedule;
+// - running inside an interval → the run must be paused first ({ask: 'pause'});
+// - now falls inside a new interval → start now, or skip that interval ({ask: 'start'}).
+async function reschedule(intervals, answer) {
+  const list = clean(intervals);
+  if (!list.length) throw new Error('Add at least one interval.');
+  await ensureToday();
+  if (sched && dayOver(sched)) {
+    await chrome.storage.local.set({ nextSchedule: { day: tomorrowKey(), intervals: list, at: Date.now() } });
+    log.info(`Tomorrow's schedule set: ${list.map(fmtIv).join(', ')}`);
+    return { saved: 'tomorrow' };
+  }
+  const running = !!run && !ctl.paused && slotAt(sched) >= 0;
+  if (running && answer.pause === undefined) return { ask: 'pause' };
+  if (running && !answer.pause) return { saved: false };
+  const cur = intervalAt(list);
+  if (cur >= 0 && answer.start === undefined) return { ask: 'start', interval: list[cur] };
+
+  if (running) {
+    ctl.pause();
+    log.info('Paused for the new schedule');
+  }
+  const skip = cur >= 0 && !answer.start;
+  sched = { day: dayKey(), intervals: list, skipped: skip ? [cur] : [], source: 'manual', at: Date.now() };
+  await chrome.storage.local.set({ schedule: sched });
+  log.info(`New schedule for today: ${list.map(fmtIv).join(', ')}${skip ? ` (${fmtIv(list[cur])} skipped)` : ''}`);
+  if (cur >= 0 && answer.start) {
+    state.error = null; // starting now is the same as pressing Start
+    await setHold(null);
+  }
+  lastSlot = -1; // the interval we are in now (if any) begins now
+  await schedTick();
+  return { saved: 'today', started: cur >= 0 && !!answer.start };
+}
+
 function pickMessage(settings) {
   const n = settings.messages.first.length;
   return n ? Math.floor(Math.random() * n) : null;
@@ -559,6 +751,12 @@ function scheduleBreak() {
   const h = run.settings.human;
   run.nextBreakAt = Date.now() + humanBetween(h.breakEveryMinMin, h.breakEveryMaxMin) * 60_000;
   state.nextBreakAt = h.breaksEnabled ? run.nextBreakAt : null;
+}
+
+// Work is allowed now: inside a schedule interval, or (schedule off) inside the work hours.
+function workAllowed(h) {
+  if (schedCfg?.enabled) return slotAt(sched) >= 0;
+  return h ? inWorkHours(h) : true;
 }
 
 function inWorkHours(h) {
@@ -584,13 +782,23 @@ function overActionBudget() {
 async function loop() {
   while (true) {
     await ctl.checkpoint();
+    if (settingsChanged) await reloadRunSettings();
     const { settings, profile } = run;
     const h = settings.human;
 
-    if (!inWorkHours(h)) {
-      if (state.status !== 'break') log.info('Outside working hours – waiting');
+    if (!workAllowed(h)) {
+      if (!run.offSchedule) {
+        const nx = nextSlot(sched);
+        log.info(schedCfg?.enabled ? `Outside the schedule – waiting for ${nx ? `the interval at ${nx.start}` : 'tomorrow'}` : 'Outside working hours – waiting');
+      }
+      run.offSchedule = true;
       ctl.set('break');
-      await ctl.sleep(60_000);
+      await ctl.sleep(30_000);
+      continue;
+    }
+    if (run.offSchedule) {
+      run.offSchedule = false;
+      await reloadRunSettings(); // a new interval works with the latest Settings
       continue;
     }
     if (h.breaksEnabled && Date.now() >= run.nextBreakAt) {
