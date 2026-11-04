@@ -2,6 +2,14 @@
 
 import { log } from './logger.js';
 
+// Every message starts with the extension's own name (its registration name), so several extensions
+// can share one chat. The background sets where the name comes from.
+let senderName = () => '';
+export function setSenderName(fn) {
+  senderName = fn;
+}
+const escHtml = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
 export class Telegram {
   constructor(cfg) {
     this.cfg = cfg;
@@ -25,6 +33,9 @@ export class Telegram {
     for (const [k, t] of this.recent) if (now - t > 60_000) this.recent.delete(k);
     if (dedupe && this.recent.has(text)) return false;
     this.recent.set(text, now);
+    const name = String(senderName() || 'Say To Leads').trim();
+    text = `${html ? `<b>${escHtml(name)}</b>` : `[${name}]`}
+${text}`;
     try {
       let res;
       if (photoBlob) {

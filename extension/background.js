@@ -8,7 +8,7 @@ import { RunControl, StopSignal } from './lib/control.js';
 import { log, getLogs, clearLogs, setVerbose } from './lib/logger.js';
 import { captureTab, diffThumbs, blobToBase64 } from './lib/capture.js';
 import { analyze, bridgeHealth, buildUserText, estimateCost, mirrorTurn } from './lib/analyzer.js';
-import { Telegram } from './lib/telegram.js';
+import { Telegram, setSenderName } from './lib/telegram.js';
 import { RelayClient, EMPTY as RELAY_EMPTY, leadsIn } from './lib/relay.js';
 import { CdpBackend, DomBackend, HumanInput } from './lib/input.js';
 import { humanBetween, pointInBox, jitterPoint, chance, rnd, clamp, readingDelayMs } from './lib/human.js';
@@ -49,6 +49,8 @@ const ctl = new RunControl((status) => {
   if (status !== 'waiting_ai') state.aiWaitingSince = null;
   publish();
 });
+
+setSenderName(() => state.relay.name); // Telegram messages start with this extension's name
 
 let run = null; // per-run context, null while idle
 let keepAlive = null;
@@ -288,7 +290,7 @@ async function handle(msg, sender) {
       return {};
     case 'testTelegram': {
       const s = await loadSettings();
-      const ok = await new Telegram({ ...s.telegram, enabled: true }).send('✅ Say To Leads: Telegram test message', null, { dedupe: false });
+      const ok = await new Telegram({ ...s.telegram, enabled: true }).send('✅ Telegram test message', null, { dedupe: false });
       if (!ok) throw new Error('Send failed – check bot token / chat id (see log).');
       return {};
     }
