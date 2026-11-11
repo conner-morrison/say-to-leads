@@ -1,7 +1,8 @@
 // The day schedule: 5–6 hours of work split into 2–5 intervals, made when the extension wakes up on a
 // new day (or by the Schedule button in Settings). Times are local "HH:MM" strings.
 // Stored in chrome.storage.local:
-//   schedule     – { day: 'YYYY-MM-DD', intervals: [{start, end}], skipped: [i], source: 'auto' | 'manual', at }
+//   schedule     – { day: 'YYYY-MM-DD', intervals: [{start, end}], skipped: [i], source: 'auto' | 'manual', at,
+//                    target: connections to send that day (null = no limit), sent: sent so far }
 //   nextSchedule – { day, intervals } a human made while the day was over; it becomes that day's schedule.
 
 import { rint, rnd } from './human.js';
@@ -59,6 +60,12 @@ export function generate(cfg, fromMin) {
   }
   return out;
 }
+
+// The day's number of connections: the Settings number ±2 at random (at least 1). null = no limit.
+export const pickTarget = (cfg) => (Number(cfg.dailySends) > 0 ? Math.max(1, Math.round(cfg.dailySends) + rint(-2, 2)) : null);
+
+// The day's number of connections has been sent.
+export const targetReached = (sched) => !!sched?.target && (sched.sent || 0) >= sched.target;
 
 // Sorted, valid intervals (end after start, no overlaps) from what a human typed.
 export function clean(intervals) {

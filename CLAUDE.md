@@ -63,6 +63,9 @@ Server mode (leads = URL + name, parsed by `leadsIn` in relay.js):
 - On the first wake-up of a day (worker load or the 1-min `schedule` alarm) today's schedule is made: 5–6 h
   in 2–5 random intervals from now (not before `dayStart`), stored as `schedule {day, intervals, skipped, source}`.
   A schedule a human set while the day was over (`nextSchedule`) is used instead.
+- Daily connections: each morning `target` = `schedule.dailySends` ±2 (random; 0 = no limit). Every `next` with
+  `outcome: sent` adds to `sent`; at the target the day is done (no more work, a new schedule goes to tomorrow).
+  A reschedule during the day keeps the target and the count.
 - Work only inside intervals: the loop waits as a break between them, watching/auto-start are off. At each
   interval start the extension starts / resumes by itself (latest Settings), unless `schedHold` is set:
   `stop` (Stop pressed – cleared by Start or the next day), `error` (error alarm), `done` (URL list finished).

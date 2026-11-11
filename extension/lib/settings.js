@@ -73,6 +73,7 @@ export const DEFAULTS = {
     // Day schedule (lib/schedule.js): made when the extension wakes up on a new day or by the Schedule
     // button; the extension works only inside its intervals and starts by itself at each one.
     enabled: true,
+    dailySends: 30, // connections to send per day; each day's number is this ±2 at random. 0 = no limit
     hoursMin: 5, // total work per day, picked at random
     hoursMax: 6,
     partsMin: 2, // number of intervals, picked at random

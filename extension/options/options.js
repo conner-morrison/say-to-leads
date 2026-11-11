@@ -10,6 +10,7 @@ const SECTIONS = [
   ['Schedule', [
     ['schedule.intervals', 'Day schedule', 'schedule'],
     ['schedule.enabled', 'Work by the day schedule', 'check', { help: 'Off: the work hours under Human behaviour apply instead and nothing starts by itself.' }],
+    ['schedule.dailySends', 'Connections per day', 'number', { step: 1, help: 'Each morning the day gets this number ±2 at random; when that many are sent, work stops until tomorrow. 0 = no limit.' }],
     ['schedule.hoursMin', 'Work per day min (h)', 'number', { step: 0.25 }],
     ['schedule.hoursMax', 'Work per day max (h)', 'number', { step: 0.25 }],
     ['schedule.partsMin', 'Intervals min', 'number', { step: 1 }],
@@ -356,6 +357,7 @@ async function loadSched() {
     text = `Today (${today.source === 'manual' ? 'set by you' : 'random'}): ${today.intervals.length} intervals, ${fmtLen(totalMin(today.intervals))} – ${now}.`;
     cls = sc.slot >= 0 ? 'good' : 'warn';
   }
+  if (sc.enabled && today?.target) text += ` Connections today: ${today.sent || 0} of ${today.target}${(today.sent || 0) >= today.target ? ' – done for today' : ''}.`;
   if (sc.enabled && sc.hold) {
     text += ` Not starting by itself: ${HOLD_TEXT[sc.hold]}.`;
     cls = 'warn';

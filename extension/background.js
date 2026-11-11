@@ -12,7 +12,7 @@ import { Telegram, setSenderName } from './lib/telegram.js';
 import { RelayClient, EMPTY as RELAY_EMPTY, leadsIn } from './lib/relay.js';
 import { CdpBackend, DomBackend, HumanInput } from './lib/input.js';
 import { humanBetween, pointInBox, jitterPoint, chance, rnd, clamp, readingDelayMs } from './lib/human.js';
-import { dayKey, tomorrowKey, generate, clean, slotAt, intervalAt, nextSlot, dayOver, nowMin } from './lib/schedule.js';
+import { dayKey, tomorrowKey, generate, clean, slotAt, intervalAt, nextSlot, dayOver, nowMin, pickTarget, targetReached } from './lib/schedule.js';
 
 const state = {
   status: 'idle', // idle | running | paused | break | waiting_ai | watching
@@ -588,22 +588,29 @@ async function ensureToday() {
   if (got.schedule?.day === today) return (sched = got.schedule);
   if (!schedCfg.enabled) return (sched = null);
   const next = got.nextSchedule;
+  const target = pickTarget(schedCfg);
   sched = next?.day === today
-    ? { day: today, intervals: next.intervals, skipped: [], source: 'manual', at: Date.now() }
-    : { day: today, intervals: generate(schedCfg, nowMin()), skipped: [], source: 'auto', at: Date.now() };
+    ? { day: today, intervals: next.intervals, skipped: [], source: 'manual', at: Date.now(), target, sent: 0 }
+    : { day: today, intervals: generate(schedCfg, nowMin()), skipped: [], source: 'auto', at: Date.now(), target, sent: 0 };
   await chrome.storage.local.set({ schedule: sched });
   if (next && next.day <= today) await chrome.storage.local.remove('nextSchedule');
   if (hold === 'stop') await setHold(null); // a Stop holds for the day it was pressed
   lastSlot = -1;
-  log.info(`Today's schedule (${sched.source === 'manual' ? 'set by you' : 'random'}): ${sched.intervals.map(fmtIv).join(', ')}`);
+  log.info(`Today's schedule (${sched.source === 'manual' ? 'set by you' : 'random'}): ${sched.intervals.map(fmtIv).join(', ')}${target ? ` · ${target} connections` : ''}`);
   return sched;
 }
 
+// The day's work is done: the last interval is over, or the day's number of connections is sent.
+const dayDone = () => !!sched && (dayOver(sched) || targetReached(sched));
+
+// The interval to work in now (-1 = none, also once the day's connections are sent).
+const workSlot = () => (targetReached(sched) ? -1 : slotAt(sched));
+
 function publishSched() {
   const on = !!schedCfg?.enabled;
-  const slot = on ? slotAt(sched) : -1;
+  const slot = on ? workSlot() : -1;
   state.sched = on
-    ? { on, slot, until: slot >= 0 ? sched.intervals[slot].end : null, next: nextSlot(sched)?.start || null, over: dayOver(sched), hold }
+    ? { on, slot, until: slot >= 0 ? sched.intervals[slot].end : null, next: dayDone() ? null : nextSlot(sched)?.start || null, over: dayDone(), hold, sent: sched?.sent || 0, target: sched?.target ?? null }
     : { on: false };
   if (!run) state.status = idleStatus();
   publish();
@@ -617,7 +624,7 @@ function schedTick() {
 
 async function tickNow() {
   await ensureToday();
-  const slot = schedCfg.enabled ? slotAt(sched) : -1;
+  const slot = schedCfg.enabled ? workSlot() : -1;
   publishSched();
   syncWatch();
   if (!schedCfg.enabled || slot === lastSlot) return;
@@ -688,15 +695,27 @@ async function resumeAll(what) {
   }
 }
 
+// One more connection sent today; at the day's number the work stops until tomorrow.
+async function countSent() {
+  if (!schedCfg?.enabled || !sched || sched.day !== dayKey()) return;
+  sched.sent = (sched.sent || 0) + 1;
+  await chrome.storage.local.set({ schedule: sched });
+  if (sched.sent === sched.target) {
+    log.info(`Today's ${sched.target} connections are sent – done for today`);
+    await run?.telegram.send(`✅ Today's ${sched.target} connections are sent – done for today.`).catch(() => {});
+  }
+  publishSched();
+}
+
 async function schedInfo() {
   const { nextSchedule } = await chrome.storage.local.get('nextSchedule');
   return {
     enabled: !!schedCfg?.enabled,
     today: sched,
     next: nextSchedule?.day === tomorrowKey() ? nextSchedule : null,
-    over: !!sched && dayOver(sched),
-    slot: slotAt(sched),
-    running: !!run && !ctl.paused && slotAt(sched) >= 0,
+    over: dayDone(),
+    slot: workSlot(),
+    running: !!run && !ctl.paused && workSlot() >= 0,
     hold,
   };
 }
@@ -704,7 +723,7 @@ async function schedInfo() {
 // Random intervals for the day a reschedule goes to: today from now, or tomorrow when today's work is over.
 async function scheduleGenerate() {
   await ensureToday();
-  const over = !!sched && dayOver(sched);
+  const over = dayDone();
   return { intervals: generate(schedCfg, over ? 0 : nowMin()), day: over ? 'tomorrow' : 'today' };
 }
 
@@ -716,12 +735,12 @@ async function reschedule(intervals, answer) {
   const list = clean(intervals);
   if (!list.length) throw new Error('Add at least one interval.');
   await ensureToday();
-  if (sched && dayOver(sched)) {
+  if (dayDone()) {
     await chrome.storage.local.set({ nextSchedule: { day: tomorrowKey(), intervals: list, at: Date.now() } });
     log.info(`Tomorrow's schedule set: ${list.map(fmtIv).join(', ')}`);
     return { saved: 'tomorrow' };
   }
-  const running = !!run && !ctl.paused && slotAt(sched) >= 0;
+  const running = !!run && !ctl.paused && workSlot() >= 0;
   if (running && answer.pause === undefined) return { ask: 'pause' };
   if (running && !answer.pause) return { saved: false };
   const cur = intervalAt(list);
@@ -732,7 +751,9 @@ async function reschedule(intervals, answer) {
     log.info('Paused for the new schedule');
   }
   const skip = cur >= 0 && !answer.start;
-  sched = { day: dayKey(), intervals: list, skipped: skip ? [cur] : [], source: 'manual', at: Date.now() };
+  // The day's number of connections stays what the morning set (and what was sent so far counts).
+  const target = sched ? sched.target ?? null : pickTarget(schedCfg);
+  sched = { day: dayKey(), intervals: list, skipped: skip ? [cur] : [], source: 'manual', at: Date.now(), target, sent: sched?.sent || 0 };
   await chrome.storage.local.set({ schedule: sched });
   log.info(`New schedule for today: ${list.map(fmtIv).join(', ')}${skip ? ` (${fmtIv(list[cur])} skipped)` : ''}`);
   if (cur >= 0 && answer.start) {
@@ -757,7 +778,7 @@ function scheduleBreak() {
 
 // Work is allowed now: inside a schedule interval, or (schedule off) inside the work hours.
 function workAllowed(h) {
-  if (schedCfg?.enabled) return slotAt(sched) >= 0;
+  if (schedCfg?.enabled) return workSlot() >= 0;
   return h ? inWorkHours(h) : true;
 }
 
@@ -790,8 +811,10 @@ async function loop() {
 
     if (!workAllowed(h)) {
       if (!run.offSchedule) {
-        const nx = nextSlot(sched);
-        log.info(schedCfg?.enabled ? `Outside the schedule – waiting for ${nx ? `the interval at ${nx.start}` : 'tomorrow'}` : 'Outside working hours – waiting');
+        const nx = dayDone() ? null : nextSlot(sched);
+        log.info(!schedCfg?.enabled ? 'Outside working hours – waiting'
+          : targetReached(sched) ? `Today's ${sched.target} connections are sent – waiting for tomorrow`
+          : `Outside the schedule – waiting for ${nx ? `the interval at ${nx.start}` : 'tomorrow'}`);
       }
       run.offSchedule = true;
       ctl.set('break');
@@ -1240,6 +1263,7 @@ async function executeActions(actions, vp, shot) {
         case 'next':
           // The API schema makes "outcome" required, so the "next" that only opens page 1 carries one too.
           if (OUTCOME_FIELD[a.outcome] && run.feedIndex >= 0) await bumpStats({ [OUTCOME_FIELD[a.outcome]]: 1 });
+          if (a.outcome === 'sent' && run.feedIndex >= 0) await countSent();
           if (run.feed.length || run.server) run.nextPage = true;
           else log.warn('"next" ignored – the feed is empty');
           break;
