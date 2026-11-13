@@ -59,7 +59,18 @@ export async function analyze(req, settings, signal) {
   throw new Error(`unknown analyzer mode ${a.mode}`);
 }
 
+// A bridge error (HTTP 500, e.g. a data file OneDrive held) is tried once more before it stops the run.
 async function viaBridge(req, a, signal) {
+  try {
+    return await bridgeOnce(req, a, signal);
+  } catch (e) {
+    if (signal.aborted || !/^bridge: bridge error/.test(e.message)) throw e;
+    await new Promise((r) => setTimeout(r, 3000));
+    return bridgeOnce(req, a, signal);
+  }
+}
+
+async function bridgeOnce(req, a, signal) {
   const timeout = AbortSignal.timeout((a.bridgeTimeoutSec + 15) * 1000);
   const url = a.bridgeUrl.replace(/\/$/, '');
   const res = await fetch(`${url}/analyze`, {

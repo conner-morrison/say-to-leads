@@ -20,6 +20,7 @@ import socket
 import sys
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -34,16 +35,38 @@ def log(msg):
     print(time.strftime("%H:%M:%S"), msg, flush=True)
 
 
+def mtime(p):
+    # A file can vanish between listing and stat (OneDrive syncs this folder): sort it first, never fail.
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0
+
+
 def archive(rid, tag):
+    # Housekeeping only: a failed move or delete (a file OneDrive holds or already removed) is logged and
+    # skipped, so it never fails the extension's request.
     dest = ARCHIVE / rid
-    dest.mkdir(parents=True, exist_ok=True)
-    for d in (INBOX, OUTBOX):
-        for f in d.glob(f"{rid}.*"):
-            shutil.move(str(f), str(dest / f"{d.name}-{f.name}"))
-    (dest / "status.txt").write_text(tag, encoding="utf-8")
-    old = sorted(ARCHIVE.iterdir(), key=lambda p: p.stat().st_mtime)[:-KEEP_ARCHIVED]
-    for p in old:
-        shutil.rmtree(p, ignore_errors=True)
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        for d in (INBOX, OUTBOX):
+            for f in d.glob(f"{rid}.*"):
+                try:
+                    shutil.move(str(f), str(dest / f"{d.name}-{f.name}"))
+                except OSError as e:
+                    log(f"archive: could not move {f.name} ({e}) - deleting it")
+                    f.unlink(missing_ok=True)
+        (dest / "status.txt").write_text(tag, encoding="utf-8")
+        for p in sorted(ARCHIVE.iterdir(), key=mtime)[:-KEEP_ARCHIVED]:
+            shutil.rmtree(p, ignore_errors=True)
+    except OSError as e:
+        log(f"archive {rid}: {e!r} (ignored)")
+        for d in (INBOX, OUTBOX):  # never leave it pending
+            for f in d.glob(f"{rid}.*"):
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -80,7 +103,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.handle_post()
         except Exception as e:
-            log(f"ERROR {self.path}: {e!r}")
+            log(f"ERROR {self.path}: {e!r}\n{traceback.format_exc()}")
             self._send(500, {"ok": False, "error": f"bridge error: {e!r}"})
 
     def handle_post(self):
@@ -98,7 +121,7 @@ class Handler(BaseHTTPRequestHandler):
         b64 = img.pop("base64", None)
         with lock:
             # The extension waits on one request at a time: anything still pending is stale.
-            for f in INBOX.glob("*.json"):
+            for f in list(INBOX.glob("*.json")):
                 archive(f.stem, "superseded")
                 log(f"superseded {f.stem}")
             jpg = INBOX / f"{rid}.jpg"
@@ -144,8 +167,11 @@ class Handler(BaseHTTPRequestHandler):
                 jpg.write_bytes(base64.b64decode(b64))
             req["image"] = {**img, "file": str(jpg)}
             (MIRROR / f"{rid}.json").write_text(json.dumps(req, indent=2, ensure_ascii=False), encoding="utf-8")
-            for f in sorted(MIRROR.iterdir(), key=lambda p: p.stat().st_mtime)[:-KEEP_MIRRORED]:
-                f.unlink(missing_ok=True)
+            for f in sorted(MIRROR.iterdir(), key=mtime)[:-KEEP_MIRRORED]:
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:
+                    pass
         res, use = req.get("result") or {}, req.get("usage") or {}
         acts = ", ".join(a.get("type", "?") for a in res.get("actions", [])) or "no actions"
         log(f"API {rid} · in={use.get('input_tokens', '?')} out={use.get('output_tokens', '?')} · {acts} · {res.get('summary', '')[:80]}")
