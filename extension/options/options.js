@@ -84,11 +84,8 @@ const SECTIONS = [
     ['human.idleScrollChance', 'Idle scroll chance', 'number', { step: 0.01 }],
     ['human.workStart', 'Work hours start (schedule off)', 'time'],
     ['human.workEnd', 'Work hours end (schedule off)', 'time'],
-    ['human.breaksEnabled', 'Take random breaks', 'check'],
-    ['human.breakEveryMinMin', 'Break every min (min)', 'number'],
-    ['human.breakEveryMaxMin', 'Break every max (min)', 'number'],
-    ['human.breakLenMinMin', 'Break length min (min)', 'number'],
-    ['human.breakLenMaxMin', 'Break length max (min)', 'number'],
+    ['human.leadBreakMinMin', 'Between leads break min (min)', 'number', { step: 0.5, help: 'After a lead is done, before the next one opens. Random between min and max.' }],
+    ['human.leadBreakMaxMin', 'Between leads break max (min)', 'number', { step: 0.5 }],
   ], { reset: 'human' }],
   ['Watchers', [
     ['watch.titleBadge', 'Detect "(3)" unread counters in title', 'check'],

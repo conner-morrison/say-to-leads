@@ -63,11 +63,8 @@ export const DEFAULTS = {
     maxActionsPerHour: 150,
     workStart: '00:00', // local time window when work is allowed (used only while the day schedule is off)
     workEnd: '23:59',
-    breaksEnabled: true,
-    breakEveryMinMin: 35,
-    breakEveryMaxMin: 75,
-    breakLenMinMin: 3,
-    breakLenMaxMin: 12,
+    leadBreakMinMin: 5, // break between leads: after one lead is done, before the next one opens (minutes)
+    leadBreakMaxMin: 12,
   },
   schedule: {
     // Day schedule (lib/schedule.js): made when the extension wakes up on a new day or by the Schedule

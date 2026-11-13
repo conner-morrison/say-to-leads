@@ -40,7 +40,7 @@ notifications and messages, and reports to you on Telegram.
 - Typing: a speed "mood" (WPM range) per message, log-normal key intervals, longer pauses after
   spaces and punctuation, random hesitations, and neighbouring-key typos that get fixed.
 - Rhythm: a think pause before every action, a reading pause before acting, random idle
-  mouse wander, scrolling in short bursts, working-hours window, random breaks, and a limit on
+  mouse wander, scrolling in short bursts, day schedule, a break between leads, and a limit on
   actions per hour.
 
 ## Low-end vs high-end PCs

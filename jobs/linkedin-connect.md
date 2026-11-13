@@ -113,4 +113,4 @@ Positions are normalized [x1, y1, x2, y2].
 - Cancel in the note box goes back to the first modal; **Escape** closes the modal without
   sending (safest way out).
 - Docked Messaging panel covers the right edge (x ≈ 0.81–1.0); don't click inside it.
-- After a click the extension may take minutes to come back (random breaks) – that's normal.
+- After a click the extension may take minutes to come back (the break between leads is 5–12 min) – that's normal.

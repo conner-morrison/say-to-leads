@@ -24,7 +24,7 @@ const state = {
   analyzer: null,
   stats: { cycles: 0, analyses: 0, actions: 0, events: 0, cost: 0 },
   lastSummary: '',
-  nextBreakAt: null,
+  breakUntil: null, // end of the break between leads, while it lasts
   aiWaitingSince: null,
   error: null,
   // The session is what the buttons switch: Start → on, Pause → paused, Resume → on, Stop (or an error
@@ -375,7 +375,6 @@ async function start() {
     lastAnalysisAt: 0,
     lastActions: [],
     actionTimes: [],
-    nextBreakAt: 0,
   };
   Object.assign(state, {
     startedAt: Date.now(),
@@ -389,7 +388,6 @@ async function start() {
   });
   state.inRun = true;
   syncWatch(); // a run ignores the server's triggers
-  scheduleBreak();
   ctl.start();
   keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(), 20_000); // keeps the MV3 worker alive while running
 
@@ -527,6 +525,21 @@ async function navigate(tabId, url) {
   await loaded;
 }
 
+// The break between leads (Settings → Human behaviour). Pausing freezes it; Stop ends it.
+async function leadBreak() {
+  const h = run.settings.human;
+  const ms = humanBetween(h.leadBreakMinMin, h.leadBreakMaxMin) * 60_000;
+  state.breakUntil = Date.now() + ms;
+  log.info(`Break between leads: ~${(ms / 60_000).toFixed(1)} min`);
+  ctl.set('break');
+  try {
+    await ctl.sleep(ms);
+  } finally {
+    state.breakUntil = null;
+  }
+  ctl.set('running');
+}
+
 // Move the linked tab to feed entry i, or end the run after the last one.
 async function openFeedPage(i) {
   if (run.server) {
@@ -547,7 +560,7 @@ async function openFeedPage(i) {
     await stop(run.server ? 'queue empty' : 'feed finished');
     throw new StopSignal();
   }
-  await ctl.sleep(humanBetween(1500, 4000)); // a person pauses before moving on
+  if (i > 0) await leadBreak(); // a person takes a break before the next lead
   run.feedIndex = i;
   const total = run.server ? i + state.queued : feed.length;
   state.feed = { index: i, total, url: feed[i] };
@@ -679,8 +692,6 @@ async function reloadRunSettings() {
     log.warn('Input driver / performance profile changes need Stop → Start');
   }
   if (run.pick != null && run.pick >= s.messages.first.length) run.pick = pickMessage(s); // the picked message was removed
-  if (!s.human.breaksEnabled) state.nextBreakAt = null;
-  else if (!old.human.breaksEnabled) scheduleBreak();
 }
 
 async function resumeAll(what) {
@@ -770,12 +781,6 @@ function pickMessage(settings) {
   return n ? Math.floor(Math.random() * n) : null;
 }
 
-function scheduleBreak() {
-  const h = run.settings.human;
-  run.nextBreakAt = Date.now() + humanBetween(h.breakEveryMinMin, h.breakEveryMaxMin) * 60_000;
-  state.nextBreakAt = h.breaksEnabled ? run.nextBreakAt : null;
-}
-
 // Work is allowed now: inside a schedule interval, or (schedule off) inside the work hours.
 function workAllowed(h) {
   if (schedCfg?.enabled) return workSlot() >= 0;
@@ -824,15 +829,6 @@ async function loop() {
     if (run.offSchedule) {
       run.offSchedule = false;
       await reloadRunSettings(); // a new interval works with the latest Settings
-      continue;
-    }
-    if (h.breaksEnabled && Date.now() >= run.nextBreakAt) {
-      const len = humanBetween(h.breakLenMinMin, h.breakLenMaxMin) * 60_000;
-      log.info(`Taking a break for ~${Math.round(len / 60_000)} min`);
-      ctl.set('break');
-      await ctl.sleep(len);
-      scheduleBreak();
-      log.info('Back from break');
       continue;
     }
     if (overActionBudget()) {

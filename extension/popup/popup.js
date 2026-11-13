@@ -33,7 +33,7 @@ function render() {
   const sc = state.sched;
   if (sc?.on) bits.push(sc.slot >= 0 ? `working till ${sc.until}` : sc.next ? `next interval ${sc.next}` : 'done for today');
   if (sc?.on && sc.target) bits.push(`sent ${sc.sent}/${sc.target} today`);
-  if (state.nextBreakAt && active) bits.push(`break ~${new Date(state.nextBreakAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+  if (state.breakUntil && active) bits.push(`next lead ~${new Date(state.breakUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
   $('meta').textContent = bits.join(' · ');
   $('summary').textContent = state.lastSummary || '';
   $('error').textContent = state.error || '';
