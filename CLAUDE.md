@@ -69,6 +69,12 @@ Server mode (leads = URL + name, parsed by `leadsIn` in relay.js):
 - Work only inside intervals: the loop waits as a break between them, watching/auto-start are off. At each
   interval start the extension starts / resumes by itself (latest Settings), unless `schedHold` is set:
   `stop` (Stop pressed – cleared by Start or the next day), `error` (error alarm), `done` (URL list finished).
+- Day report: when the day's final interval is over (`schedule.reported` marks it sent; a day the browser
+  was closed for is reported at the next day's first wake-up) a Telegram table goes out:
+  `| Brought | Sent | Failed | Queue |` = leads fetched from the server today, `next` outcomes `sent` / `error`
+  today (`dayStats`, counted with the weekly stats in `bumpStats`), leads left in the queue.
+- Week report: the same table for Monday–Friday (`weekRep`, keyed by the Monday) right after Friday's day
+  report; a week it missed is sent at the first wake-up on the weekend or in the next week.
 - Reschedule (Schedule button = random, or edited times → Save schedule; message `reschedule`): day over →
   tomorrow's schedule; running in an interval → ask to pause first; now inside a new interval → ask start now,
   else that interval is skipped and work starts at the next one.

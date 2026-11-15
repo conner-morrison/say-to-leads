@@ -437,30 +437,92 @@ async function halt(kind, text, photo = null) {
 
 const OUTCOME_FIELD = { sent: 'sent', pending: 'pending', error: 'error' };
 let statsOp = Promise.resolve();
+// Counts go to the week (weekStats) and to the day (dayStats, started over on a new day).
 function bumpStats(delta) {
   statsOp = statsOp.then(async () => {
-    const { weekStats: w = { since: Date.now(), fetched: 0, sent: 0, pending: 0, error: 0 } } = await chrome.storage.local.get('weekStats');
-    for (const [k, n] of Object.entries(delta)) w[k] = (w[k] || 0) + n;
-    await chrome.storage.local.set({ weekStats: w });
-  }).catch((e) => log.warn(`Weekly stats not saved: ${e.message}`));
+    const got = await chrome.storage.local.get(['weekStats', 'dayStats', 'weekRep']);
+    const w = got.weekStats ?? { since: Date.now(), fetched: 0, sent: 0, pending: 0, error: 0 };
+    const d = got.dayStats?.day === dayKey() ? got.dayStats : { day: dayKey(), fetched: 0, sent: 0, pending: 0, error: 0 };
+    const r = got.weekRep?.week === weekKey() ? got.weekRep : { week: weekKey(), fetched: 0, sent: 0, pending: 0, error: 0 };
+    for (const [k, n] of Object.entries(delta)) {
+      w[k] = (w[k] || 0) + n;
+      d[k] = (d[k] || 0) + n;
+      r[k] = (r[k] || 0) + n;
+    }
+    await chrome.storage.local.set({ weekStats: w, dayStats: d, weekRep: r });
+  }).catch((e) => log.warn(`Lead stats not saved: ${e.message}`));
   return statsOp;
+}
+
+// Leads not done yet; the one a run stopped on is still at the head of the queue.
+async function leadsLeft() {
+  return run?.server || !run ? (await readQueue()).length : Math.max(run.feed.length - Math.max(run.feedIndex, 0), 0);
+}
+
+// A monospace table for Telegram: cols = [[header, [cell, …]], …].
+function tgTable(cols) {
+  const width = cols.map(([h, v]) => Math.max(h.length, ...v.map((x) => x.length)));
+  const row = (cells) => `| ${cells.map((c, i) => c.padEnd(width[i])).join(' | ')} |`;
+  const lines = [row(cols.map(([h]) => h)), row(width.map((n) => '-'.repeat(n)))];
+  const rows = Math.max(...cols.map(([, v]) => v.length));
+  for (let i = 0; i < rows; i++) lines.push(row(cols.map(([, v]) => v[i] ?? '')));
+  const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return `<pre>${esc(lines.join('\n'))}</pre>`;
+}
+
+// The week a day belongs to: the dayKey of its Monday.
+function weekKey(d = new Date()) {
+  const m = new Date(d.getFullYear(), d.getMonth(), d.getDate() - ((d.getDay() + 6) % 7));
+  return dayKey(m);
+}
+const keyDate = (key) => new Date(`${key}T12:00`);
+const fmtDay = (key) => keyDate(key).toLocaleDateString([], { month: 'short', day: 'numeric' });
+
+// Brought from the server, sent, failed (outcome error), left in the queue – as a Telegram table.
+async function sendReport(title, s) {
+  const queue = await leadsLeft();
+  const cols = [['Brought', [String(s.fetched || 0)]], ['Sent', [String(s.sent || 0)]], ['Failed', [String(s.error || 0)]], ['Queue', [String(queue)]]];
+  const tg = run?.telegram ?? new Telegram((await loadSettings()).telegram);
+  const ok = await tg.send(`${title}\n${tgTable(cols)}`, null, { dedupe: false, html: true }).catch(() => false);
+  log.info(`${title.replace(/<[^>]+>/g, '')}${ok ? '' : ' (not sent to Telegram)'}`, { ...s, queue });
+}
+
+// The day's report, once the day's work is over; on a Friday the week's report follows.
+async function sendDayReport(day) {
+  await statsOp;
+  const { dayStats } = await chrome.storage.local.get('dayStats');
+  await sendReport(`📅 <b>Day report</b> (${fmtDay(day)})`, dayStats?.day === day ? dayStats : {});
+  if (keyDate(day).getDay() === 5) await sendWeekReport(weekKey(keyDate(day)));
+}
+
+// The week's report (Monday to Friday), once per week.
+async function sendWeekReport(week) {
+  await statsOp;
+  const { weekRep } = await chrome.storage.local.get('weekRep');
+  const r = weekRep?.week === week ? weekRep : { week, fetched: 0, sent: 0, pending: 0, error: 0 };
+  if (r.reported) return;
+  const fri = keyDate(week);
+  fri.setDate(fri.getDate() + 4);
+  await sendReport(`🗓 <b>Week report</b> (${fmtDay(week)} – ${fmtDay(dayKey(fri))})`, r);
+  await chrome.storage.local.set({ weekRep: { ...r, reported: true } });
+}
+
+// A week whose Friday report never went out (browser closed, no schedule that day): sent late, once.
+async function catchUpWeekReport() {
+  const { weekRep } = await chrome.storage.local.get('weekRep');
+  if (!weekRep || weekRep.reported) return;
+  const now = new Date();
+  if (weekRep.week !== weekKey() || now.getDay() === 6 || now.getDay() === 0) await sendWeekReport(weekRep.week);
 }
 
 async function sendWeeklySummary(tg) {
   await statsOp;
   const { weekStats: w = { since: Date.now(), fetched: 0, sent: 0, pending: 0, error: 0 } } = await chrome.storage.local.get('weekStats');
-  // Left = leads not done yet; the one the limit stopped on is still at the head of the queue.
-  const left = run?.server || !run ? (await readQueue()).length : Math.max(run.feed.length - Math.max(run.feedIndex, 0), 0);
-  const notSent = [`${w.error} error`, `${w.pending} pending`, `${left} left`];
+  const notSent = [`${w.error} error`, `${w.pending} pending`, `${await leadsLeft()} left`];
   const cols = [['Fetched', [String(w.fetched)]], ['Not sent', notSent], ['Sent', [String(w.sent)]]];
-  const width = cols.map(([h, v]) => Math.max(h.length, ...v.map((x) => x.length)));
-  const row = (cells) => `| ${cells.map((c, i) => c.padEnd(width[i])).join(' | ')} |`;
-  const lines = [row(cols.map(([h]) => h)), row(width.map((n) => '-'.repeat(n)))];
-  for (let i = 0; i < notSent.length; i++) lines.push(row(cols.map(([, v]) => v[i] ?? '')));
   const since = new Date(w.since).toLocaleDateString([], { month: 'short', day: 'numeric' });
-  const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const ok = await tg.send(`📊 <b>This week's connections</b> (since ${since})\n<pre>${esc(lines.join('\n'))}</pre>`, null, { dedupe: false, html: true });
-  log.info('Weekly summary', { ...w, left });
+  const ok = await tg.send(`📊 <b>This week's connections</b> (since ${since})\n${tgTable(cols)}`, null, { dedupe: false, html: true });
+  log.info('Weekly summary', { ...w, left: notSent[2] });
   if (ok) await chrome.storage.local.set({ weekStats: { since: Date.now(), fetched: 0, sent: 0, pending: 0, error: 0 } });
 }
 
@@ -599,6 +661,13 @@ async function ensureToday() {
   hold = got.schedHold ?? null;
   const today = dayKey();
   if (got.schedule?.day === today) return (sched = got.schedule);
+  const old = got.schedule;
+  if (old?.intervals?.length && !old.reported) { // the browser was closed before that day's report went out
+    old.reported = true;
+    await chrome.storage.local.set({ schedule: old });
+    await sendDayReport(old.day);
+  }
+  await catchUpWeekReport();
   if (!schedCfg.enabled) return (sched = null);
   const next = got.nextSchedule;
   const target = pickTarget(schedCfg);
@@ -637,6 +706,11 @@ function schedTick() {
 
 async function tickNow() {
   await ensureToday();
+  if (schedCfg.enabled && sched?.intervals.length && !sched.reported && dayOver(sched)) {
+    sched.reported = true; // the final interval is over: the day's report, once
+    await chrome.storage.local.set({ schedule: sched });
+    await sendDayReport(sched.day);
+  }
   const slot = schedCfg.enabled ? workSlot() : -1;
   publishSched();
   syncWatch();
