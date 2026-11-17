@@ -10,6 +10,7 @@ In Claude API mode the extension can POST a copy of each finished turn (request 
 answer) to /mirror; it is only recorded in data/mirror/ so a run can be watched (cli.py mirror).
 
     python3 bridge/bridge.py [--port 8765]
+    python3 bridge/bridge.py --wake-claude [--wake-model sonnet]   Claude Code answers by itself (wake.py)
 """
 import argparse
 import base64
@@ -29,6 +30,7 @@ INBOX, OUTBOX, ARCHIVE, MIRROR = DATA / "inbox", DATA / "outbox", DATA / "archiv
 KEEP_ARCHIVED = 200
 KEEP_MIRRORED = 400  # files (2 per turn)
 lock = threading.Lock()
+waker = None  # wake.Waker when --wake-claude is on
 
 
 def log(msg):
@@ -133,6 +135,8 @@ class Handler(BaseHTTPRequestHandler):
             tmp.replace(INBOX / f"{rid}.json")  # json last: a visible .json means the pair is complete
         events = len(req.get("events") or [])
         log(f"NEW {rid} · {req.get('page', {}).get('title', '')[:60]} · events={events}")
+        if waker:
+            waker.wake(rid)
 
         timeout = min(float(req.get("timeoutSec") or 900), 3600)
         deadline = time.time() + timeout
@@ -192,6 +196,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--wake-claude", action="store_true", help="start a headless Claude Code run per request")
+    ap.add_argument("--wake-model", default="sonnet", help="model for --wake-claude (sonnet, opus, haiku or a full id)")
+    ap.add_argument("--wake-session", choices=["one", "request"], default="one",
+                    help="one: all requests in one resumed Claude Code session (default); request: a fresh one each")
+    ap.add_argument("--wake-timeout", type=float, default=300, help="seconds one run may take")
+    ap.add_argument("--claude", help="path to the claude executable (default: PATH, else the VS Code extension's)")
     a = ap.parse_args()
     for d in (INBOX, OUTBOX, ARCHIVE, MIRROR):
         d.mkdir(parents=True, exist_ok=True)
@@ -201,6 +211,11 @@ def main():
         log(f"port {a.port} is in use ({e}) - another bridge is probably running already; stop it first")
         sys.exit(1)
     srv.daemon_threads = True
+    if a.wake_claude:
+        global waker
+        from wake import Waker
+        waker = Waker(log, a.claude, a.wake_model, a.wake_timeout, session=a.wake_session)
+        log(f"wake-claude on: {a.wake_model}, session {a.wake_session} via {waker.claude}")
     log(f"bridge listening on http://{a.host}:{a.port}  (data: {DATA})")
     # "localhost" may resolve to IPv6 ::1 in Chrome: answer there too when the default host is used.
     if a.host == "127.0.0.1":

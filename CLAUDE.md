@@ -20,6 +20,14 @@ development. Later the analyzer is switched to the Claude API (`analyzer.mode = 
 5. Repeat. Only the newest request is live; older ones are auto-archived as superseded.
    The extension waits up to `analyzer.bridgeTimeoutSec` (default 900s) per request.
 
+Unattended: `python3 bridge/bridge.py --wake-claude [--wake-model sonnet]` (`bridge/wake.py`) starts one
+headless `claude -p` per request (the request's system prompt, only the Read tool for the screenshot),
+validates the JSON it prints and delivers it; nothing runs between requests. `--wake-session one` (default)
+resumes one shared session for all requests (id in `bridge/data/wake_session.txt`; delete it for a new
+session); `request` = a fresh, unsaved one each. The log shows `WAKE … done in Ns · $cost · context N tokens`.
+`python3 bridge/wake.py <id>` is a dry run on a pending/archived request.
+Don't run a `cli.py wait` loop while it is on.
+
 ## Feed
 
 Settings → Feed holds page URLs, one per line. Start opens nothing and does no job on its own; it

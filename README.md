@@ -25,6 +25,8 @@ notifications and messages, and reports to you on Telegram.
 1. **Load the extension:** `chrome://extensions` → enable *Developer mode* → *Load unpacked* →
    pick the `extension/` folder.
 2. **Start the bridge** (debug mode): `python3 bridge/bridge.py` (Python 3.8+, no packages needed).
+   Add `--wake-claude` to have the bridge start a headless Claude Code run for each request by itself
+   (no open chat needed; each run's cost is in the bridge log).
 3. Open the target website, click the extension icon → **Link this tab**.
 4. ⚙ **Settings**: put the page URLs in *Feed* (one per line), set up Telegram (optional), save.
 5. Press **Start**. Start opens no page and does no job on its own; while the screen is unchanged it
