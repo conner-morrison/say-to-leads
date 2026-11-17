@@ -4,7 +4,6 @@
 export const PROFILES = {
   low: {
     name: 'low',
-    captureMaxWidth: 1024,
     jpegQuality: 0.55,
     thumbSize: 24,
     mouseStepPx: 30, // one mousemove event per ~N px of travel
@@ -14,7 +13,6 @@ export const PROFILES = {
   },
   high: {
     name: 'high',
-    captureMaxWidth: 1568, // ~Claude's preferred long edge; bigger buys nothing
     jpegQuality: 0.8,
     thumbSize: 48,
     mouseStepPx: 10,

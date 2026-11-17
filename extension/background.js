@@ -967,7 +967,7 @@ async function cycle() {
 
   let shot;
   try {
-    shot = await captureTab(tab, { backend, profile, scale: Number(settings.analyzer.imageScale) || 1 });
+    shot = await captureTab(tab, { backend, profile, scale: Number(settings.analyzer.imageScale) || 1, viewportWidth: vp.w });
   } catch (e) {
     if (e.message !== 'TAB_NOT_VISIBLE') throw e;
     log.warn('Linked tab is not visible – bring it to the front (or use the debugger driver)');

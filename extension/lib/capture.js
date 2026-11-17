@@ -7,9 +7,13 @@ function withTimeout(p, ms, label) {
   return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${label} timeout`)), ms))]);
 }
 
-// scale shrinks the image further after the profile's width cap (e.g. 1/3 to save AI tokens).
+// Claude downsizes anything with a longer edge than this, so a bigger image only costs upload time.
+const MAX_EDGE = 1568;
+
+// The image sent is the page at Settings → Screenshot size for AI (scale) of its viewport size in CSS px
+// (width = the viewport's, not the device pixels': a 2x display doesn't double it), capped at MAX_EDGE.
 // Analyzer coordinates are normalized, so a smaller image needs no position conversion.
-export async function captureTab(tab, { backend, profile, scale: extraScale = 1 }) {
+export async function captureTab(tab, { backend, profile, scale: setScale = 1, viewportWidth = 0 }) {
   let blob = null;
   if (backend?.kind === 'debugger' && backend.attached) {
     // CDP capture also works when the tab is not the focused one.
@@ -33,7 +37,9 @@ export async function captureTab(tab, { backend, profile, scale: extraScale = 1 
   let out = blob;
   let w = bmp.width;
   let h = bmp.height;
-  const scale = Math.min(1, profile.captureMaxWidth / bmp.width) * Math.min(1, Math.max(0.1, extraScale));
+  const base = viewportWidth > 0 ? Math.min(1, viewportWidth / bmp.width) : 1;
+  const want = base * Math.min(1, Math.max(0.1, setScale));
+  const scale = Math.min(want, MAX_EDGE / Math.max(bmp.width, bmp.height));
   if (scale < 1) {
     w = Math.round(bmp.width * scale);
     h = Math.round(bmp.height * scale);
